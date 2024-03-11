@@ -1,0 +1,13 @@
+[package]
+name = "simpl_actor_macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+heck = "0.4.1"
+proc-macro2 = "1.0.78"
+syn = { version = "2.0.52", features = ["extra-traits", "full"] }
+quote = "1.0.35"

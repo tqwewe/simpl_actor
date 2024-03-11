@@ -1,0 +1,12 @@
+[package]
+name = "simpl_actor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+simpl_actor_macros = { path = "../simpl_actor_macros" }
+
+async-trait = "0.1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "sync"] }
+tracing = "0.1"
