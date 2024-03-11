@@ -147,7 +147,7 @@ impl Actor {
             ..
         } = self;
 
-        let methods = messages.iter().cloned().map(
+        let sync_methods = messages.iter().cloned().map(
             |Message {
                  mut sig,
                  variant,
@@ -191,10 +191,46 @@ impl Actor {
             },
         );
 
+        let async_methods = messages.iter().cloned().map(
+            |Message {
+                 mut sig,
+                 variant,
+                 fields,
+             }| {
+                sig.constness = None;
+                sig.asyncness = Some(Token![async](Span::call_site()));
+                sig.ident = format_ident!("{}_async", sig.ident);
+                sig.inputs = [parse_quote! { &self }]
+                    .into_iter()
+                    .chain(
+                        fields
+                            .iter()
+                            .map(|field| FnArg::Typed(parse_quote! { #field })),
+                    )
+                    .collect();
+                sig.output = ReturnType::Default;
+
+                let field_idents = fields.iter().map(|field| field.ident.as_ref().unwrap());
+
+                quote! {
+                    pub #sig {
+                        self
+                            .0
+                            .send(#actor_msg_ident::#variant {
+                                __reply: ::std::option::Option::None,
+                                #( #field_idents ),*
+                            })
+                            .await;
+                    }
+                }
+            },
+        );
+
         quote! {
             #[automatically_derived]
             impl #actor_ref_ident {
-                #( #methods )*
+                #( #sync_methods )*
+                #( #async_methods )*
             }
         }
     }
