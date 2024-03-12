@@ -1,4 +1,4 @@
-use heck::ToUpperCamelCase;
+use heck::{ToShoutySnekCase, ToUpperCamelCase};
 use proc_macro2::Span;
 use quote::{format_ident, quote, ToTokens};
 use syn::{
@@ -126,6 +126,115 @@ impl Actor {
         }
     }
 
+    fn expand_send_error_to_actor_error(
+        &self,
+        variant: &Ident,
+        fields: &Punctuated<Field, Token![,]>,
+    ) -> proc_macro2::TokenStream {
+        let Self {
+            actor_msg_ident, ..
+        } = self;
+
+        let field_idents: Punctuated<_, Token![,]> = fields
+            .iter()
+            .map(|field| field.ident.as_ref().unwrap())
+            .collect();
+
+        quote! {
+            match err.0 {
+                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                    __reply: _,
+                    #field_idents
+                }) => ::simpl_actor::ActorError::ActorNotRunning((
+                    #field_idents
+                )),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
+    fn expand_try_send_error_to_actor_error(
+        &self,
+        variant: &Ident,
+        fields: &Punctuated<Field, Token![,]>,
+    ) -> proc_macro2::TokenStream {
+        let Self {
+            actor_msg_ident, ..
+        } = self;
+
+        let field_idents: Punctuated<_, Token![,]> = fields
+            .iter()
+            .map(|field| field.ident.as_ref().unwrap())
+            .collect();
+
+        quote! {
+            match err {
+                ::tokio::sync::mpsc::error::TrySendError::Full(
+                    ::simpl_actor::Signal::Message(
+                        #actor_msg_ident::#variant {
+                            __reply: _,
+                            #field_idents
+                        }
+                    )
+                ) => ::simpl_actor::ActorError::MailboxFull((
+                    #field_idents
+                )),
+                ::tokio::sync::mpsc::error::TrySendError::Closed(
+                    ::simpl_actor::Signal::Message(
+                        #actor_msg_ident::#variant {
+                            __reply: _,
+                            #field_idents
+                        }
+                    )
+                ) => ::simpl_actor::ActorError::ActorNotRunning((
+                    #field_idents
+                )),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
+    fn expand_timeout_send_error_to_actor_error(
+        &self,
+        variant: &Ident,
+        fields: &Punctuated<Field, Token![,]>,
+    ) -> proc_macro2::TokenStream {
+        let Self {
+            actor_msg_ident, ..
+        } = self;
+
+        let field_idents: Punctuated<_, Token![,]> = fields
+            .iter()
+            .map(|field| field.ident.as_ref().unwrap())
+            .collect();
+
+        quote! {
+            match err {
+                ::tokio::sync::mpsc::error::SendTimeoutError::Closed(
+                    ::simpl_actor::Signal::Message(
+                        #actor_msg_ident::#variant {
+                            __reply: _,
+                            #field_idents
+                        }
+                    )
+                ) => ::simpl_actor::ActorError::ActorNotRunning((
+                    #field_idents
+                )),
+                ::tokio::sync::mpsc::error::SendTimeoutError::Timeout(
+                    ::simpl_actor::Signal::Message(
+                        #actor_msg_ident::#variant {
+                            __reply: _,
+                            #field_idents
+                        }
+                    )
+                ) => ::simpl_actor::ActorError::Timeout((
+                    #field_idents
+                )),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
     fn expand_actor_ref_struct(&self) -> proc_macro2::TokenStream {
         let Self {
             actor_msg_ident,
@@ -135,7 +244,10 @@ impl Actor {
 
         quote! {
             #[derive(Clone, Debug)]
-            pub struct #actor_ref_ident(::tokio::sync::mpsc::Sender<#actor_msg_ident>);
+            pub struct #actor_ref_ident {
+                channel: ::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident>>,
+                stop_notify: ::std::sync::Arc<::tokio::sync::Notify>
+            }
         }
     }
 
@@ -147,12 +259,19 @@ impl Actor {
             ..
         } = self;
 
-        let sync_methods = messages.iter().cloned().map(
+        let methods = messages.iter().map(
             |Message {
-                 mut sig,
+                 sig,
                  variant,
                  fields,
              }| {
+                 let field_idents: Vec<_> = fields
+                     .iter()
+                     .map(|field| field.ident.as_ref().unwrap())
+                     .collect();
+                let field_tys: Punctuated<_, Token![,]> = fields.iter().map(|field| &field.ty).collect();
+
+                let mut sig = sig.clone();
                 sig.constness = None;
                 sig.asyncness = Some(Token![async](Span::call_site()));
                 sig.inputs = [parse_quote! { &self }]
@@ -165,62 +284,123 @@ impl Actor {
                     .collect();
                 sig.output = match sig.output {
                     ReturnType::Default => {
-                        parse_quote! { -> ::std::result::Result<(), ::tokio::sync::oneshot::error::RecvError> }
-                    },
+                        parse_quote! { -> ::std::result::Result<(), ::simpl_actor::ActorError<( #field_tys )>> }
+                    }
                     ReturnType::Type(_, ty) => {
-                        parse_quote! { -> ::std::result::Result<#ty, ::tokio::sync::oneshot::error::RecvError> }
-                    },
+                        parse_quote! { -> ::std::result::Result<#ty, ::simpl_actor::ActorError<( #field_tys )>> }
+                    }
                 };
 
-                let field_idents = fields.iter().map(|field| field.ident.as_ref().unwrap());
+                let mut timeout_sig = sig.clone();
+                timeout_sig.ident = format_ident!("{}_timeout", sig.ident);
+                timeout_sig.inputs.push(FnArg::Typed(parse_quote! { timeout: ::std::time::Duration }));
+
+                let mut try_sig = sig.clone();
+                try_sig.ident = format_ident!("try_{}", sig.ident);
+
+                let mut async_sig = sig.clone();
+                async_sig.ident = format_ident!("{}_async", async_sig.ident);
+                async_sig.output =
+                    parse_quote! { -> ::std::result::Result<(), ::simpl_actor::ActorError<( #field_tys )>> };
+
+                let mut async_timeout_sig = async_sig.clone();
+                async_timeout_sig.ident = format_ident!("{}_timeout", async_sig.ident);
+                async_timeout_sig.inputs.push(FnArg::Typed(parse_quote! { timeout: ::std::time::Duration }));
+
+                let mut try_async_sig = async_sig.clone();
+                try_async_sig.asyncness = None;
+                try_async_sig.ident = format_ident!("try_{}", async_sig.ident);
+                try_async_sig.output =
+                    parse_quote! { -> ::std::result::Result<(), ::simpl_actor::ActorError<( #field_tys )>> };
+
+                let map_err = self.expand_send_error_to_actor_error(variant, fields);
+                let timeout_map_err = self.expand_timeout_send_error_to_actor_error(variant, fields);
+                let try_map_err = self.expand_try_send_error_to_actor_error(variant, fields);
 
                 quote! {
                     pub #sig {
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
-                        let _ = self
-                            .0
-                            .send(#actor_msg_ident::#variant {
+                        self
+                            .channel
+                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
-                            })
-                            .await;
+                            }))
+                            .await
+                            .map_err(|err| #map_err)?;
 
-                        rx.await
+                        rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
                     }
-                }
-            },
-        );
 
-        let async_methods = messages.iter().cloned().map(
-            |Message {
-                 mut sig,
-                 variant,
-                 fields,
-             }| {
-                sig.constness = None;
-                sig.asyncness = Some(Token![async](Span::call_site()));
-                sig.ident = format_ident!("{}_async", sig.ident);
-                sig.inputs = [parse_quote! { &self }]
-                    .into_iter()
-                    .chain(
-                        fields
-                            .iter()
-                            .map(|field| FnArg::Typed(parse_quote! { #field })),
-                    )
-                    .collect();
-                sig.output = ReturnType::Default;
-
-                let field_idents = fields.iter().map(|field| field.ident.as_ref().unwrap());
-
-                quote! {
-                    pub #sig {
+                    pub #timeout_sig {
+                        let (reply, rx) = ::tokio::sync::oneshot::channel();
                         self
-                            .0
-                            .send(#actor_msg_ident::#variant {
+                            .channel
+                            .send_timeout(
+                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                    __reply: ::std::option::Option::Some(reply),
+                                    #( #field_idents ),*
+                                }),
+                                timeout,
+                            )
+                            .await
+                            .map_err(|err| #timeout_map_err)?;
+
+                        rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
+                    }
+
+                    pub #try_sig {
+                        let (reply, rx) = ::tokio::sync::oneshot::channel();
+                        self
+                            .channel
+                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                __reply: ::std::option::Option::Some(reply),
+                                #( #field_idents ),*
+                            }))
+                            .map_err(|err| #try_map_err)?;
+
+                        rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
+                    }
+
+                    pub #async_sig {
+                        self
+                            .channel
+                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
-                            })
-                            .await;
+                            }))
+                            .await
+                            .map_err(|err| #map_err)?;
+
+                        Ok(())
+                    }
+
+                    pub #async_timeout_sig {
+                        self
+                            .channel
+                            .send_timeout(
+                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                    __reply: ::std::option::Option::None,
+                                    #( #field_idents ),*
+                                }),
+                                timeout,
+                            )
+                            .await
+                            .map_err(|err| #timeout_map_err)?;
+
+                        Ok(())
+                    }
+
+                    pub #try_async_sig {
+                        self
+                            .channel
+                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                __reply: ::std::option::Option::None,
+                                #( #field_idents ),*
+                            }))
+                            .map_err(|err| #try_map_err)?;
+
+                        Ok(())
                     }
                 }
             },
@@ -229,8 +409,37 @@ impl Actor {
         quote! {
             #[automatically_derived]
             impl #actor_ref_ident {
-                #( #sync_methods )*
-                #( #async_methods )*
+                #( #methods )*
+            }
+        }
+    }
+
+    fn expand_actor_ref_impl_actor_ref(&self) -> proc_macro2::TokenStream {
+        let Self {
+            actor_ref_ident, ..
+        } = self;
+
+        quote! {
+            #[automatically_derived]
+            #[async_trait::async_trait]
+            impl ::simpl_actor::ActorRef for #actor_ref_ident {
+                async fn stop_gracefully(&self) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
+                    self
+                        .channel
+                        .send(::simpl_actor::Signal::Stop)
+                        .await
+                        .map_err(|_| {
+                            ::simpl_actor::ActorError::ActorNotRunning(())
+                        })
+                }
+
+                fn stop_immediately(&self) {
+                    self.stop_notify.notify_waiters();
+                }
+
+                async fn wait_for_stop(&self) {
+                    self.channel.closed().await;
+                }
             }
         }
     }
@@ -275,7 +484,15 @@ impl Actor {
             },
         );
 
+        let task_local_ident =
+            format_ident!("{}_ACTOR_REF", ident.to_string().TO_SHOUTY_SNEK_CASE());
+
         quote! {
+            ::tokio::task_local! {
+                #[doc(hidden)]
+                static #task_local_ident: #actor_ref_ident;
+            }
+
             #[automatically_derived]
             impl ::simpl_actor::Spawn for #ident {
                 type Ref = #actor_ref_ident;
@@ -283,23 +500,44 @@ impl Actor {
                 fn spawn(self) -> Self::Ref {
                     fn handle_messages<'a>(
                         actor: &'a mut #ident,
-                        rx: &'a mut ::tokio::sync::mpsc::Receiver<#actor_msg_ident>,
+                        rx: &'a mut ::tokio::sync::mpsc::Receiver<::simpl_actor::Signal<#actor_msg_ident>>,
                     ) -> ::core::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = ()> + ::core::marker::Send + 'a>> {
                         ::std::boxed::Box::pin(async move {
-                            while let ::std::option::Option::Some(msg) = rx.recv().await {
-                                match msg {
-                                    #( #handlers )*
+                            while let ::std::option::Option::Some(signal) = rx.recv().await {
+                                match signal {
+                                    ::simpl_actor::Signal::Message(msg) => match msg {
+                                        #( #handlers )*
+                                    }
+                                    ::simpl_actor::Signal::Stop => {
+                                        return;
+                                    }
                                 }
                             }
                         })
                     }
 
-                    let tx = ::simpl_actor::spawn_actor::<
-                        Self,
-                        #actor_msg_ident,
-                        _,
-                    >(self, <Self as ::simpl_actor::Actor>::channel_size(), handle_messages);
-                    #actor_ref_ident(tx)
+                    let (tx, rx) =
+                        ::tokio::sync::mpsc::channel(<Self as ::simpl_actor::Actor>::channel_size());
+                    let stop_notify = ::std::sync::Arc::new(::tokio::sync::Notify::new());
+                    let actor_ref = #actor_ref_ident {
+                        channel: tx,
+                        stop_notify: ::std::sync::Arc::clone(&stop_notify)
+                    };
+
+                    ::tokio::spawn(#task_local_ident.scope(actor_ref.clone(), async move {
+                        ::simpl_actor::run_actor_lifecycle::<Self, #actor_msg_ident, _>(
+                            self,
+                            rx,
+                            stop_notify,
+                            handle_messages
+                        ).await
+                    }));
+
+                    actor_ref
+                }
+
+                fn actor_ref() -> Option<Self::Ref> {
+                    #task_local_ident.try_with(|actor_ref| actor_ref.clone()).ok()
                 }
             }
         }
@@ -312,6 +550,7 @@ impl ToTokens for Actor {
         let msg_enum = self.expand_msg_enum();
         let actor_ref_struct = self.expand_actor_ref_struct();
         let actor_ref_impl = self.expand_actor_ref_impl();
+        let actor_ref_impl_actor_ref = self.expand_actor_ref_impl_actor_ref();
         let spawn_impl = self.expand_spawn_impl();
 
         tokens.extend(quote! {
@@ -320,6 +559,7 @@ impl ToTokens for Actor {
             #msg_enum
             #actor_ref_struct
             #actor_ref_impl
+            #actor_ref_impl_actor_ref
             #spawn_impl
         });
     }
