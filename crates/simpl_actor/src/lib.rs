@@ -1,35 +1,41 @@
 //! `simpl_actor` - A Rust library for actor-based concurrency, built on Tokio.
 //!
 //! # Features
+//!
 //! - Simple Actor Definition: Define actors with minimal code using Rust structs and macros.
 //! - Automatic Message Handling: Leverages Rust's type system and async capabilities.
 //! - Asynchronous & Synchronous Messaging: Flexible interaction patterns for actors.
 //! - Lifecycle Management: Hooks for actor initialization, restart, and shutdown.
 //!
 //! # Quick Start
+//!
 //! ```
 //! use simpl_actor::{actor, Actor, Spawn};
 //!
-//! #[derive(Actor)]
-//! pub struct CounterActor { count: i64, }
+//! #[derive(Actor, Default)]
+//! pub struct CounterActor { count: i64 }
 //!
 //! #[actor]
 //! impl CounterActor {
-//!     pub fn new() -> Self { CounterActor { count: 0 } }
-//!     #[message] pub fn inc(&mut self, amount: i64) {}
-//!     #[message] pub fn dec(&mut self, amount: i64) {}
-//!     #[message] pub fn count(&self) -> i64 {}
+//!     #[message]
+//!     pub fn inc(&mut self, amount: i64) { ... }
+//!
+//!     #[message]
+//!     pub fn count(&self) -> i64 { ... }
+//!
+//!     #[message]
+//!     pub async fn fetch(&self) -> String { ... }
 //! }
+//!
+//! let actor = CounterActor::default().spawn();
+//! actor.inc(1).await?;
+//! actor.count().await?; // Returns 1
+//! actor.fetch().await?;
 //! ```
 //!
 //! # Messaging Variants
+//!
 //! Provides six variants for message handling, ranging from synchronous to non-blocking asynchronous methods, with or without timeouts.
-//!
-//! # Contributing
-//! Contributions are welcome. Submit pull requests, create issues, or suggest improvements.
-//!
-//! # License
-//! Dual-licensed under MIT or Apache License, Version 2.0. Choose the license that best suits your project needs.
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -55,6 +61,32 @@ pub use simpl_actor_macros::{actor, Actor};
 ///
 /// Implementors of this trait can leverage asynchronous task execution,
 /// lifecycle management hooks, and custom error handling.
+///
+/// This can be implemented with default behaviour using the [Actor](simpl_actor_macros::Actor) derive macro.
+///
+/// # Example
+///
+/// ```
+/// #[async_trait]
+/// impl Actor for MyActor {
+///     type Error = ();
+///
+///     async fn pre_start(&mut self) -> Result<(), Self::Error> {
+///         // actor is about to start up initially
+///         Ok(())
+///     }
+///
+///     async fn pre_restart(&mut self, err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
+///         // actor panicked, return true if the actor should be restarted
+///         Ok(true)
+///     }
+///
+///     async fn pre_stop(self, reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
+///         // actor is being stopped, any cleanup code can go here
+///         Ok(())
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait Actor: Sized {
     /// The error type that can be returned from the actor's methods.
