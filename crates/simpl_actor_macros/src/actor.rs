@@ -317,8 +317,24 @@ impl Actor {
                 let timeout_map_err = self.expand_timeout_send_error_to_actor_error(variant, fields);
                 let try_map_err = self.expand_try_send_error_to_actor_error(variant, fields);
 
+                let normal_debug_msg = format!(
+                    "cannot call non-async messages on self as this would deadlock - please use the {} variant instead\nthis assertion only occurs on debug builds, release builds will deadlock",
+                    async_sig.ident
+                );
+                let timeout_debug_msg = format!(
+                    "cannot call non-async messages on self as this would deadlock - please use the {} variant instead\nthis assertion only occurs on debug builds, release builds will deadlock",
+                    async_timeout_sig.ident
+                );
+                let try_debug_msg = format!(
+                    "cannot call non-async messages on self as this would deadlock - please use the {} variant instead\nthis assertion only occurs on debug builds, release builds will deadlock",
+                    try_async_sig.ident
+                );
                 quote! {
                     pub #sig {
+                        debug_assert!(
+                            #actor_ref_global_ident.try_with(|_| {}).is_err(),
+                            #normal_debug_msg
+                        );
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         self
                             .channel
@@ -333,6 +349,10 @@ impl Actor {
                     }
 
                     pub #timeout_sig {
+                        debug_assert!(
+                            #actor_ref_global_ident.try_with(|_| {}).is_err(),
+                            #timeout_debug_msg
+                        );
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         self
                             .channel
@@ -350,6 +370,11 @@ impl Actor {
                     }
 
                     pub #try_sig {
+                        debug_assert!(
+                            #actor_ref_global_ident.try_with(|_| {}).is_err(),
+                            #try_debug_msg
+                        );
+
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         self
                             .channel
