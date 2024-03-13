@@ -19,13 +19,14 @@ pub struct Actor {
 
 #[derive(Clone)]
 struct Message {
+    vis: Visibility,
     sig: Signature,
     variant: Ident,
     fields: Punctuated<Field, Token![,]>,
 }
 
-impl From<Signature> for Message {
-    fn from(sig: Signature) -> Self {
+impl From<(Visibility, Signature)> for Message {
+    fn from((vis, sig): (Visibility, Signature)) -> Self {
         let variant = format_ident!("{}", sig.ident.to_string().to_upper_camel_case());
         let fields = sig
             .inputs
@@ -49,6 +50,7 @@ impl From<Signature> for Message {
             .collect();
 
         Message {
+            vis,
             sig,
             variant,
             fields,
@@ -82,7 +84,10 @@ impl Actor {
                     });
 
                     if has_message {
-                        Some(Message::from(impl_item_fn.sig.clone()))
+                        Some(Message::from((
+                            impl_item_fn.vis.clone(),
+                            impl_item_fn.sig.clone(),
+                        )))
                     } else {
                         None
                     }
@@ -261,6 +266,7 @@ impl Actor {
 
         let methods = messages.iter().map(
             |Message {
+                 vis,
                  sig,
                  variant,
                  fields,
@@ -331,6 +337,7 @@ impl Actor {
                 );
                 quote! {
                     pub #sig {
+                    #vis #sig {
                         debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #normal_debug_msg
@@ -349,6 +356,7 @@ impl Actor {
                     }
 
                     pub #timeout_sig {
+                    #vis #timeout_sig {
                         debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #timeout_debug_msg
@@ -370,6 +378,7 @@ impl Actor {
                     }
 
                     pub #try_sig {
+                    #vis #try_sig {
                         debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #try_debug_msg
@@ -390,6 +399,7 @@ impl Actor {
                     pub #async_sig {
                         self
                             .channel
+                    #vis #async_sig {
                             .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
@@ -403,6 +413,7 @@ impl Actor {
                     pub #async_timeout_sig {
                         self
                             .channel
+                    #vis #async_timeout_sig {
                             .send_timeout(
                                 ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                     __reply: ::std::option::Option::None,
@@ -419,6 +430,7 @@ impl Actor {
                     pub #try_async_sig {
                         self
                             .channel
+                    #vis #try_async_sig {
                             .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
