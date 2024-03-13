@@ -210,7 +210,7 @@ impl<E: fmt::Display> fmt::Display for ActorStopReason<E> {
 }
 
 /// Error that can occur when sending a message to an actor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ActorError<E = ()> {
     /// The actor isn't running.
     ActorNotRunning(E),
@@ -220,6 +220,23 @@ pub enum ActorError<E = ()> {
     MailboxFull(E),
     /// The actor's mailbox remained full, and the timeout elapsed.
     Timeout(E),
+}
+
+impl<E> fmt::Debug for ActorError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActorError::ActorNotRunning(_) => {
+                write!(f, "ActorNotRunning")
+            }
+            ActorError::ActorStopped => write!(f, "ActorStopped"),
+            ActorError::MailboxFull(_) => {
+                write!(f, "MailboxFull")
+            }
+            ActorError::Timeout(_) => {
+                write!(f, "Timeout")
+            }
+        }
+    }
 }
 
 impl<E> fmt::Display for ActorError<E> {
