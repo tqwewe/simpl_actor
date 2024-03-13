@@ -135,12 +135,27 @@ pub trait Spawn {
     /// A reference to the spawned actor, of the type specified by `Self::Ref`.
     fn spawn(self) -> Self::Ref;
 
+    /// Retrieves a reference to the current actor.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if called outside the scope of an actor.
+    ///
+    /// # Returns
+    /// A reference to the actor of type `Self::Ref`.
+    fn actor_ref(&self) -> Self::Ref {
+        match Self::try_actor_ref() {
+            Some(actor_ref) => actor_ref,
+            None => panic!("actor_ref called outside the scope of an actor"),
+        }
+    }
+
     /// Retrieves a reference to the current actor, if available.
     ///
     /// # Returns
     /// An `Option` containing a reference to the actor of type `Self::Ref` if available,
     /// or `None` if the actor reference is not available.
-    fn actor_ref() -> Option<Self::Ref>;
+    fn try_actor_ref() -> Option<Self::Ref>;
 }
 
 /// Provides functionality to stop and wait for an actor to complete based on an actor ref.
