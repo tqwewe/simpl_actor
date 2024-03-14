@@ -56,7 +56,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tracing::{debug, error};
 
 pub use simpl_actor_macros::{actor, Actor};
@@ -75,12 +75,12 @@ pub use simpl_actor_macros::{actor, Actor};
 /// impl Actor for MyActor {
 ///     type Error = ();
 ///
-///     async fn on_start(&mut self) -> Result<(), Self::Error> {
+///     async fn on_start(&mut self, id: u64) -> Result<(), Self::Error> {
 ///         // actor is about to start up initially
 ///         Ok(())
 ///     }
 ///
-///     async fn on_panic(&mut self, err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
+///     async fn on_panic(&mut self, err: Box<dyn Any + Send>) -> Result<ShouldRestart, Self::Error> {
 ///         // actor panicked, return true if the actor should be restarted
 ///         Ok(true)
 ///     }
@@ -208,14 +208,22 @@ pub trait Spawn {
     /// returning a reference to the newly spawned actor. This reference can be used
     /// to send messages to the actor.
     ///
+    /// The spawned actor is not linked to any others.
+    ///
     /// # Returns
     /// A reference to the spawned actor, of the type specified by `Self::Ref`.
     fn spawn(self) -> Self::Ref;
 
-    /// Spawns an actor with a bidirectional link between the current actor and the child.
+    /// Spawns an actor with a bidirectional link between the current actor and the one being spawned.
     ///
-    /// If either actor dies, [`Actor::on_link_died`] will be called on the other actor.
-    async fn spawn_link(self) -> Result<Self::Ref, ActorError>;
+    /// If either actor dies, [Actor::on_link_died] will be called on the other actor.
+    async fn spawn_link(self) -> Self::Ref;
+
+    /// Spawns an actor with a unidirectional link between the current actor and the child.
+    ///
+    /// If the current actor dies, [Actor::on_link_died] will be called on the spawned one,
+    /// however if the spawned actor dies, [Actor::on_link_died] will not be called.
+    async fn spawn_child(self) -> Self::Ref;
 
     /// Retrieves a reference to the current actor.
     ///
@@ -241,24 +249,32 @@ pub trait Spawn {
 }
 
 /// Provides functionality to stop and wait for an actor to complete based on an actor ref.
+///
+/// This trait is automatically implemented by the [`actor`] macro.
 #[async_trait]
-pub trait ActorRef: Send + Sync {
+pub trait ActorRef: Clone + Send + Sync {
     /// Returns the actor identifier.
     fn id(&self) -> u64;
 
     /// Returns whether the actor is currently alive.
     fn is_alive(&self) -> bool;
 
-    /// Links the actor with another.
-    ///
-    /// If either actor dies, [`Actor::on_link_died`] will be called on the other actor.
-    async fn link<R: ActorRef + Into<GenericActorRef>>(
-        &self,
-        actor_ref: R,
-    ) -> Result<(), ActorError>;
+    /// Links this actor with a child, notifying the child actor if the parent dies through
+    /// [Actor::on_link_died], but not visa versa.
+    async fn link_child<R: ActorRef>(&self, child: &R);
 
     /// Unlinks the actor with a previously linked actor.
-    async fn unlink<R: ActorRef>(&self, actor_ref: &R) -> Result<(), ActorError>;
+    async fn unlink_child<R: ActorRef>(&self, child: &R);
+
+    /// Links two actors with one another, notifying eachother if either actor dies through [Actor::on_link_died].
+    ///
+    /// This operation is atomic.
+    async fn link_together<R: ActorRef>(&self, actor_ref: &R);
+
+    /// Unlinks two previously linked actors.
+    ///
+    /// This operation is atomic.
+    async fn unlink_together<R: ActorRef>(&self, actor_ref: &R);
 
     /// Notifies the actor that one of its links died.
     ///
@@ -302,6 +318,11 @@ pub trait ActorRef: Send + Sync {
     /// actor.wait_for_stop().await;
     /// ```
     async fn wait_for_stop(&self);
+
+    #[doc(hidden)]
+    fn into_generic(self) -> GenericActorRef;
+    #[doc(hidden)]
+    fn from_generic(actor_ref: GenericActorRef) -> Self;
 }
 
 /// Enum indiciating if an actor should be restarted or not after panicking.
@@ -408,9 +429,10 @@ tokio::task_local! {
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct GenericActorRef {
-    pub id: u64,
-    pub mailbox: mpsc::Sender<Signal<()>>,
-    pub stop_notify: Arc<Notify>,
+    id: u64,
+    mailbox: mpsc::Sender<Signal<()>>,
+    stop_notify: Arc<Notify>,
+    links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
 }
 
 impl GenericActorRef {
@@ -426,19 +448,29 @@ impl GenericActorRef {
         id: u64,
         channel: mpsc::Sender<Signal<M>>,
         stop_notify: Arc<Notify>,
+        links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     ) -> Self {
         GenericActorRef {
             id,
             mailbox: unsafe { mem::transmute(channel) },
             stop_notify,
+            links,
         }
     }
 
-    pub fn into_parts<M>(self) -> (u64, mpsc::Sender<Signal<M>>, Arc<Notify>) {
+    pub fn into_parts<M>(
+        self,
+    ) -> (
+        u64,
+        mpsc::Sender<Signal<M>>,
+        Arc<Notify>,
+        Arc<Mutex<HashMap<u64, GenericActorRef>>>,
+    ) {
         (
             self.id,
             unsafe { mem::transmute(self.mailbox) },
             self.stop_notify,
+            self.links,
         )
     }
 
@@ -457,18 +489,49 @@ impl ActorRef for GenericActorRef {
     }
 
     fn is_alive(&self) -> bool {
-        self.mailbox.is_closed()
+        !self.mailbox.is_closed()
     }
 
-    async fn link<R: ActorRef + Into<GenericActorRef>>(
-        &self,
-        actor_ref: R,
-    ) -> Result<(), ActorError> {
-        self.signal(Signal::Link(actor_ref.into())).await
+    async fn link_child<R: ActorRef>(&self, child: &R) {
+        if self.id == child.id() {
+            return;
+        }
+
+        let child: GenericActorRef = child.clone().into_generic();
+        self.links.lock().await.insert(child.id, child);
     }
 
-    async fn unlink<R: ActorRef>(&self, actor_ref: &R) -> Result<(), ActorError> {
-        self.signal(Signal::Unlink(actor_ref.id())).await
+    async fn unlink_child<R: ActorRef>(&self, child: &R) {
+        if self.id == child.id() {
+            return;
+        }
+
+        self.links.lock().await.remove(&child.id());
+    }
+
+    async fn link_together<R: ActorRef>(&self, actor_ref: &R) {
+        if self.id == actor_ref.id() {
+            return;
+        }
+
+        let actor_ref: GenericActorRef = actor_ref.clone().into_generic();
+        let acotr_ref_links = actor_ref.links.clone();
+        let (mut this_links, mut other_links) =
+            tokio::join!(self.links.lock(), acotr_ref_links.lock());
+        this_links.insert(actor_ref.id, actor_ref);
+        other_links.insert(self.id, self.clone());
+    }
+
+    async fn unlink_together<R: ActorRef>(&self, actor_ref: &R) {
+        if self.id == actor_ref.id() {
+            return;
+        }
+
+        let actor_ref: GenericActorRef = actor_ref.clone().into_generic();
+        let (mut this_links, mut other_links) =
+            tokio::join!(self.links.lock(), actor_ref.links.lock());
+        this_links.remove(&actor_ref.id);
+        other_links.remove(&self.id);
     }
 
     async fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), ActorError> {
@@ -486,6 +549,14 @@ impl ActorRef for GenericActorRef {
     async fn wait_for_stop(&self) {
         self.mailbox.closed().await;
     }
+
+    fn into_generic(self) -> GenericActorRef {
+        self
+    }
+
+    fn from_generic(actor_ref: GenericActorRef) -> Self {
+        actor_ref
+    }
 }
 
 #[doc(hidden)]
@@ -493,8 +564,6 @@ impl ActorRef for GenericActorRef {
 pub enum Signal<M> {
     Message(M),
     Stop,
-    Link(GenericActorRef),
-    Unlink(u64),
     LinkDied(u64, ActorStopReason),
 }
 
@@ -504,13 +573,12 @@ pub async fn run_actor_lifecycle<A, M, F>(
     mut actor: A,
     mut rx: mpsc::Receiver<Signal<M>>,
     stop_notify: Arc<Notify>,
+    links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     handle_message: F,
 ) where
     A: Actor + Send + Sync,
     F: for<'a> Fn(&'a mut A, M) -> BoxFuture<'a, ()>,
 {
-    let mut links = HashMap::new();
-
     if let Err(_err) = actor.on_start(id).await {
         let _ = actor.on_stop(ActorStopReason::Panicked).await;
         return;
@@ -519,7 +587,6 @@ pub async fn run_actor_lifecycle<A, M, F>(
     let reason = loop {
         let process_fut = AssertUnwindSafe({
             let actor = &mut actor;
-            let links = &mut links;
             let rx = &mut rx;
             let handle_message = &handle_message;
             async move {
@@ -527,12 +594,6 @@ pub async fn run_actor_lifecycle<A, M, F>(
                     match signal {
                         Signal::Message(msg) => handle_message(actor, msg).await,
                         Signal::Stop => break,
-                        Signal::Link(actor_ref) => {
-                            links.insert(actor_ref.id(), actor_ref);
-                        }
-                        Signal::Unlink(id) => {
-                            links.remove(&id);
-                        }
                         Signal::LinkDied(id, reason) => {
                             match actor.on_link_died(id, reason.clone()).await {
                                 Ok(ShouldStop::Yes) => {
@@ -579,7 +640,7 @@ pub async fn run_actor_lifecycle<A, M, F>(
         error!("on_stop hook error: {err:?}");
     }
 
-    for link in links.values() {
-        let _ = link.notify_link_died(id, reason.clone()).await;
+    for (_, actor_ref) in links.lock().await.drain() {
+        let _ = actor_ref.notify_link_died(id, reason.clone()).await;
     }
 }

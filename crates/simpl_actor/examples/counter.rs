@@ -15,7 +15,7 @@ pub struct CounterActor {
 impl Actor for CounterActor {
     type Error = Infallible;
 
-    async fn on_start(&mut self) -> Result<(), Self::Error> {
+    async fn on_start(&mut self, _id: u64) -> Result<(), Self::Error> {
         println!("starting actor {}", any::type_name::<Self>());
         Ok(())
     }
@@ -25,7 +25,7 @@ impl Actor for CounterActor {
         Ok(ShouldRestart::Yes)
     }
 
-    async fn on_stop(self, reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
+    async fn on_stop(self, reason: ActorStopReason) -> Result<(), Self::Error> {
         println!(
             "stopping actor {} because {reason}",
             any::type_name::<Self>()

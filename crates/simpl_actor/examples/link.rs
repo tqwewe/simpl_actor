@@ -12,7 +12,7 @@ pub struct MyActor {
 #[actor]
 impl MyActor {
     #[message]
-    pub async fn spawn_linked(&self) -> Result<MyActorRef, ActorError> {
+    pub async fn spawn_linked(&self) -> MyActorRef {
         MyActor::default().spawn_link().await
     }
 
@@ -57,11 +57,20 @@ impl Actor for MyActor {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), ActorError> {
-    let one = MyActor::default().spawn();
-    let two = one.spawn_linked().await??;
-    let _ = two.force_panic().await;
+    let parent = MyActor::default().spawn();
+    let child_a = MyActor::default().spawn();
+    let child_b = MyActor::default().spawn();
+    parent.link_child(&child_b).await;
 
-    join(one.wait_for_stop(), two.wait_for_stop()).await;
+    let _ = child_a.force_panic().await;
+    assert!(parent.is_alive());
+    assert!(child_b.is_alive());
+
+    let _ = parent.force_panic().await;
+    assert!(!parent.is_alive());
+    assert!(!child_b.is_alive());
+
+    join(parent.wait_for_stop(), child_b.wait_for_stop()).await;
 
     Ok(())
 }
