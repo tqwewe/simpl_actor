@@ -517,7 +517,7 @@ pub async fn run_actor_lifecycle<A, M, F>(
     }
 
     let reason = loop {
-        let nest_signal_fut = AssertUnwindSafe({
+        let process_fut = AssertUnwindSafe({
             let actor = &mut actor;
             let links = &mut links;
             let rx = &mut rx;
@@ -560,7 +560,7 @@ pub async fn run_actor_lifecycle<A, M, F>(
             _ = stop_notify.notified() => {
                 break ActorStopReason::Normal;
             }
-            res = nest_signal_fut => {
+            res = process_fut => {
                 match res {
                     Ok(reason) => break reason,
                     Err(err) => match actor.on_panic(err).await {
