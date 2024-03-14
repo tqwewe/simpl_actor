@@ -195,7 +195,7 @@ impl Actor {
                 }) => ::simpl_actor::ActorError::ActorNotRunning((
                     #field_idents
                 )),
-                _ => unimplemented!(),
+                _ => ::std::unimplemented!(),
             }
         }
     }
@@ -236,7 +236,7 @@ impl Actor {
                 ) => ::simpl_actor::ActorError::ActorNotRunning((
                     #field_idents
                 )),
-                _ => unimplemented!(),
+                _ => ::std::unimplemented!(),
             }
         }
     }
@@ -277,7 +277,7 @@ impl Actor {
                 ) => ::simpl_actor::ActorError::Timeout((
                     #field_idents
                 )),
-                _ => unimplemented!(),
+                _ => ::std::unimplemented!(),
             }
         }
     }
@@ -293,7 +293,8 @@ impl Actor {
         quote! {
             #[derive(Clone, Debug)]
             pub struct #actor_ref_ident {
-                channel: ::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident #actor_msg_generics>>,
+                id: u64,
+                mailbox: ::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident #actor_msg_generics>>,
                 stop_notify: ::std::sync::Arc<::tokio::sync::Notify>
             }
         }
@@ -322,7 +323,7 @@ impl Actor {
                      .collect();
                 let field_tys: Punctuated<_, Token![,]> = fields.iter().map(|field| &field.ty).collect();
 
-                let channel = {
+                let mailbox = {
                     let generic_params: Punctuated<_, Token![,]> = messages.iter().enumerate().flat_map(|(j, Message { generics, .. })| {
                         generics
                             .lifetimes()
@@ -345,9 +346,9 @@ impl Actor {
                     }).collect();
                     let all_generics = (!generic_params.is_empty()).then_some(quote! { < #generic_params > });
                     quote! {{
-                        let channel: &::tokio::sync::mpsc::Sender<::simpl_actor::Signal<CounterActorMsg #all_generics>> =
-                            unsafe { ::std::mem::transmute(&self.channel) };
-                        channel
+                        let mailbox: &::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident #all_generics>> =
+                            unsafe { ::std::mem::transmute(&self.mailbox) };
+                        mailbox
                     }}
                 };
 
@@ -414,13 +415,13 @@ impl Actor {
                 quote! {
                     #[allow(non_snake_case)]
                     #vis #sig {
-                        debug_assert!(
+                        ::std::debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #normal_debug_msg
                         );
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
-                        #channel
+                        #mailbox
                             .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
@@ -433,13 +434,13 @@ impl Actor {
 
                     #[allow(non_snake_case)]
                     #vis #timeout_sig {
-                        debug_assert!(
+                        ::std::debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #timeout_debug_msg
                         );
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
-                        #channel
+                        #mailbox
                             .send_timeout(
                                 ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                     __reply: ::std::option::Option::Some(reply),
@@ -455,13 +456,13 @@ impl Actor {
 
                     #[allow(non_snake_case)]
                     #vis #try_sig {
-                        debug_assert!(
+                        ::std::debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
                             #try_debug_msg
                         );
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
-                        #channel
+                        #mailbox
                             .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
@@ -473,7 +474,7 @@ impl Actor {
 
                     #[allow(non_snake_case)]
                     #vis #async_sig {
-                        #channel
+                        #mailbox
                             .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
@@ -481,12 +482,12 @@ impl Actor {
                             .await
                             .map_err(|err| #map_err)?;
 
-                        Ok(())
+                        ::std::result::Result::Ok(())
                     }
 
                     #[allow(non_snake_case)]
                     #vis #async_timeout_sig {
-                        #channel
+                        #mailbox
                             .send_timeout(
                                 ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                     __reply: ::std::option::Option::None,
@@ -497,19 +498,19 @@ impl Actor {
                             .await
                             .map_err(|err| #timeout_map_err)?;
 
-                        Ok(())
+                        ::std::result::Result::Ok(())
                     }
 
                     #[allow(non_snake_case)]
                     #vis #try_async_sig {
-                        #channel
+                        #mailbox
                             .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
                             }))
                             .map_err(|err| #try_map_err)?;
 
-                        Ok(())
+                        ::std::result::Result::Ok(())
                     }
                 }
             },
@@ -530,16 +531,49 @@ impl Actor {
 
         quote! {
             #[automatically_derived]
-            #[async_trait::async_trait]
+            #[::async_trait::async_trait]
             impl ::simpl_actor::ActorRef for #actor_ref_ident {
+                fn id(&self) -> u64 {
+                    self.id
+                }
+
+                fn is_alive(&self) -> bool {
+                    self.mailbox.is_closed()
+                }
+
+                async fn link<
+                    R: ::simpl_actor::ActorRef + ::std::convert::Into<::simpl_actor::GenericActorRef>,
+                >(&self, actor_ref: R) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
+                    self.mailbox
+                        .send(::simpl_actor::Signal::Link(::std::convert::Into::into(actor_ref)))
+                        .await
+                        .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
+                }
+
+                async fn unlink<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
+                    self.mailbox
+                        .send(::simpl_actor::Signal::Unlink(actor_ref.id()))
+                        .await
+                        .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
+                }
+
+                async fn notify_link_died(
+                    &self,
+                    id: u64,
+                    reason: ::simpl_actor::ActorStopReason,
+                ) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
+                    self.mailbox
+                        .send(::simpl_actor::Signal::LinkDied(id, reason))
+                        .await
+                        .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
+                }
+
                 async fn stop_gracefully(&self) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
                     self
-                        .channel
+                        .mailbox
                         .send(::simpl_actor::Signal::Stop)
                         .await
-                        .map_err(|_| {
-                            ::simpl_actor::ActorError::ActorNotRunning(())
-                        })
+                        .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
                 }
 
                 fn stop_immediately(&self) {
@@ -547,7 +581,28 @@ impl Actor {
                 }
 
                 async fn wait_for_stop(&self) {
-                    self.channel.closed().await;
+                    self.mailbox.closed().await;
+                }
+            }
+
+            impl ::std::convert::From<#actor_ref_ident> for ::simpl_actor::GenericActorRef {
+                fn from(actor_ref: #actor_ref_ident) -> ::simpl_actor::GenericActorRef {
+                    ::simpl_actor::GenericActorRef::from_parts(
+                        actor_ref.id,
+                        actor_ref.mailbox,
+                        actor_ref.stop_notify
+                    )
+                }
+            }
+
+            impl ::std::convert::From<::simpl_actor::GenericActorRef> for #actor_ref_ident {
+                fn from(actor_ref: ::simpl_actor::GenericActorRef) -> #actor_ref_ident {
+                    let (id, mailbox, stop_notify) = actor_ref.into_parts();
+                    #actor_ref_ident {
+                        id,
+                        mailbox,
+                        stop_notify,
+                    }
                 }
             }
         }
@@ -564,37 +619,40 @@ impl Actor {
             ..
         } = self;
 
-        let handlers = messages.iter().map(
-            |Message {
-                 sig,
-                 variant,
-                 fields,
-                 ..
-             }| {
-                let fn_ident = &sig.ident;
-                let dot_await = if sig.asyncness.is_some() {
-                    quote! { .await }
-                } else {
-                    quote! {}
-                };
-                let field_idents: Vec<_> = fields
-                    .iter()
-                    .map(|field| field.ident.as_ref().unwrap())
-                    .collect();
+        let handlers: Vec<_> = messages
+            .iter()
+            .map(
+                |Message {
+                     sig,
+                     variant,
+                     fields,
+                     ..
+                 }| {
+                    let fn_ident = &sig.ident;
+                    let dot_await = if sig.asyncness.is_some() {
+                        quote! { .await }
+                    } else {
+                        quote! {}
+                    };
+                    let field_idents: Vec<_> = fields
+                        .iter()
+                        .map(|field| field.ident.as_ref().unwrap())
+                        .collect();
 
-                quote! {
-                    #actor_msg_ident::#variant {
-                        __reply,
-                        #( #field_idents ),*
-                    } => {
-                        let res = actor.#fn_ident( #( #field_idents ),* ) #dot_await;
-                        if let ::std::option::Option::Some(reply) = __reply {
-                            let _ = reply.send(res);
+                    quote! {
+                        #actor_msg_ident::#variant {
+                            __reply,
+                            #( #field_idents ),*
+                        } => {
+                            let res = actor.#fn_ident( #( #field_idents ),* ) #dot_await;
+                            if let ::std::option::Option::Some(reply) = __reply {
+                                let _ = reply.send(res);
+                            }
                         }
                     }
-                }
-            },
-        );
+                },
+            )
+            .collect();
 
         quote! {
             ::tokio::task_local! {
@@ -603,49 +661,66 @@ impl Actor {
             }
 
             #[automatically_derived]
+            #[::async_trait::async_trait]
             impl ::simpl_actor::Spawn for #ident {
                 type Ref = #actor_ref_ident;
 
                 fn spawn(self) -> Self::Ref {
-                    fn handle_messages<'a>(
+                    fn handle_message<'a>(
                         actor: &'a mut #ident,
-                        rx: &'a mut ::tokio::sync::mpsc::Receiver<::simpl_actor::Signal<#actor_msg_ident #actor_msg_generics>>,
+                        msg: #actor_msg_ident #actor_msg_generics,
                     ) -> ::core::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = ()> + ::core::marker::Send + 'a>> {
                         ::std::boxed::Box::pin(async move {
-                            while let ::std::option::Option::Some(signal) = rx.recv().await {
-                                match signal {
-                                    ::simpl_actor::Signal::Message(msg) => match msg {
-                                        #( #handlers )*
-                                    }
-                                    ::simpl_actor::Signal::Stop => {
-                                        return;
-                                    }
-                                }
+                            match msg {
+                                #( #handlers )*
                             }
                         })
                     }
 
                     let (tx, rx) =
-                        ::tokio::sync::mpsc::channel(<Self as ::simpl_actor::Actor>::channel_size());
+                        ::tokio::sync::mpsc::channel(<Self as ::simpl_actor::Actor>::mailbox_size());
                     let stop_notify = ::std::sync::Arc::new(::tokio::sync::Notify::new());
+                    let id = ::simpl_actor::new_actor_id();
                     let actor_ref = #actor_ref_ident {
-                        channel: tx,
+                        id,
+                        mailbox: tx,
                         stop_notify: ::std::sync::Arc::clone(&stop_notify)
                     };
+                    let generic_actor_ref: ::simpl_actor::GenericActorRef = actor_ref.clone().into();
 
                     ::tokio::spawn(#actor_ref_global_ident.scope(actor_ref.clone(), async move {
-                        ::simpl_actor::run_actor_lifecycle::<Self, #actor_msg_ident #actor_msg_generics, _>(
-                            self,
-                            rx,
-                            stop_notify,
-                            handle_messages
-                        ).await
+                        ::simpl_actor::CURRENT_ACTOR.scope(generic_actor_ref, async move {
+                            ::simpl_actor::run_actor_lifecycle::<Self, #actor_msg_ident #actor_msg_generics, _>(
+                                id,
+                                self,
+                                rx,
+                                stop_notify,
+                                handle_message
+                            ).await
+                        }).await
                     }));
 
                     actor_ref
                 }
 
-                fn try_actor_ref() -> Option<Self::Ref> {
+                async fn spawn_link(self) -> ::std::result::Result<Self::Ref, ::simpl_actor::ActorError> {
+                    let link = ::simpl_actor::GenericActorRef::try_current();
+                    let actor_ref = ::simpl_actor::Spawn::spawn(self);
+                    match link {
+                        ::std::option::Option::Some(parent_actor_ref) => {
+                            // Signal the parent to link with the child
+                            ::simpl_actor::ActorRef::link(&parent_actor_ref, actor_ref.clone()).await?;
+                            // Signal the child to link with the parent
+                            ::simpl_actor::ActorRef::link(&actor_ref, parent_actor_ref).await?;
+                        }
+                        ::std::option::Option::None => {
+                            ::std::panic!("spawn_link cannot be called outside any actors")
+                        }
+                    }
+                    ::std::result::Result::Ok(actor_ref)
+                }
+
+                fn try_actor_ref() -> ::std::option::Option<Self::Ref> {
                     #actor_ref_global_ident.try_with(|actor_ref| actor_ref.clone()).ok()
                 }
             }

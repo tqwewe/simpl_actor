@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use simpl_actor::{actor, Actor, ActorError, ActorRef, ActorStopReason, Spawn};
+use simpl_actor::{actor, Actor, ActorError, ActorRef, ActorStopReason, ShouldRestart, Spawn};
 
 pub struct CounterActor {
     count: i64,
@@ -15,17 +15,17 @@ pub struct CounterActor {
 impl Actor for CounterActor {
     type Error = Infallible;
 
-    async fn pre_start(&mut self) -> Result<(), Self::Error> {
+    async fn on_start(&mut self) -> Result<(), Self::Error> {
         println!("starting actor {}", any::type_name::<Self>());
         Ok(())
     }
 
-    async fn pre_restart(&mut self, _err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
+    async fn on_panic(&mut self, _err: Box<dyn Any + Send>) -> Result<ShouldRestart, Self::Error> {
         println!("restarting actor {}", any::type_name::<Self>());
-        Ok(true)
+        Ok(ShouldRestart::Yes)
     }
 
-    async fn pre_stop(self, reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
+    async fn on_stop(self, reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
         println!(
             "stopping actor {} because {reason}",
             any::type_name::<Self>()
@@ -84,7 +84,7 @@ async fn main() {
     // Trigger the actor to sleep for 500ms in the background
     assert_eq!(actor.sleep_async().await, Ok(()));
     // Fill the mailbox with messages
-    for _ in 0..CounterActor::channel_size() {
+    for _ in 0..CounterActor::mailbox_size() {
         assert_eq!(actor.inc_async(1).await, Ok(()));
     }
     // Mailbox should be full, so if we try to send a message without backpressure using the try_ method,

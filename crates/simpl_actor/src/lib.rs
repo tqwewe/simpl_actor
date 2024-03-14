@@ -45,15 +45,19 @@
 
 use std::{
     any::{self, Any},
-    fmt,
+    collections::HashMap,
+    fmt, mem,
     panic::AssertUnwindSafe,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt};
 use tokio::sync::{mpsc, Notify};
-use tracing::debug;
+use tracing::{debug, error};
 
 pub use simpl_actor_macros::{actor, Actor};
 
@@ -71,35 +75,52 @@ pub use simpl_actor_macros::{actor, Actor};
 /// impl Actor for MyActor {
 ///     type Error = ();
 ///
-///     async fn pre_start(&mut self) -> Result<(), Self::Error> {
+///     async fn on_start(&mut self) -> Result<(), Self::Error> {
 ///         // actor is about to start up initially
 ///         Ok(())
 ///     }
 ///
-///     async fn pre_restart(&mut self, err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
+///     async fn on_panic(&mut self, err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
 ///         // actor panicked, return true if the actor should be restarted
 ///         Ok(true)
 ///     }
 ///
-///     async fn pre_stop(self, reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
+///     async fn on_stop(self, reason: ActorStopReason) -> Result<(), Self::Error> {
 ///         // actor is being stopped, any cleanup code can go here
 ///         Ok(())
+///     }
+///
+///     async fn on_link_died(
+///         &self,
+///         id: u64,
+///         reason: ActorStopReason,
+///     ) -> Result<ShouldStop, Self::Error> {
+///         match reason {
+///             ActorStopReason::Normal => {
+///                 debug!("linked actor {id} stopped normally");
+///                 Ok(ShouldStop::No)
+///             }
+///             ActorStopReason::Panicked | ActorStopReason::LinkDied { .. } => {
+///                 debug!("linked actor {id} stopped with error");
+///                 Ok(ShouldStop::Yes)
+///             }
+///         }
 ///     }
 /// }
 /// ```
 #[async_trait]
-pub trait Actor: Sized {
+pub trait Actor: Spawn + Sized {
     /// The error type that can be returned from the actor's methods.
-    type Error: Send;
+    type Error: Clone + fmt::Debug + Send + Sync + 'static;
 
-    /// Specifies the default size of the actor's message channel.
+    /// Specifies the default size of the actor's mailbox.
     ///
     /// This method can be overridden to change the size of the mailbox, affecting
     /// how many messages can be queued before backpressure is applied.
     ///
     /// # Returns
-    /// The size of the message channel. The default is 64.
-    fn channel_size() -> usize {
+    /// The size of the mailbox. The default is 64.
+    fn mailbox_size() -> usize {
         64
     }
 
@@ -110,24 +131,24 @@ pub trait Actor: Sized {
     ///
     /// # Returns
     /// A result indicating successful initialization or an error if initialization fails.
-    async fn pre_start(&mut self) -> Result<(), Self::Error> {
-        debug!("starting actor {}", any::type_name::<Self>());
+    async fn on_start(&mut self, id: u64) -> Result<(), Self::Error> {
+        debug!("starting actor #{id} {}", any::type_name::<Self>());
         Ok(())
     }
 
-    /// Hook that is called when an actor is about to be restarted after an error.
+    /// Hook that is called when an actor panicked.
     ///
-    /// This method provides an opportunity to clean up or reset state before the actor
-    /// is restarted. It can also determine whether the actor should actually be restarted
+    /// This method provides an opportunity to clean up or reset state.
+    /// It can also determine whether the actor should actually be restarted
     /// based on the nature of the error.
     ///
     /// # Parameters
-    /// - `err`: The error that caused the actor to be restarted.
+    /// - `err`: The error that occurred.
     ///
     /// # Returns
-    /// A boolean indicating whether the actor should be restarted (`true`) or not (`false`).
-    async fn pre_restart(&mut self, _err: Box<dyn Any + Send>) -> Result<bool, Self::Error> {
-        Ok(false)
+    /// Whether the actor should be restarted or not.
+    async fn on_panic(&mut self, _err: Box<dyn Any + Send>) -> Result<ShouldRestart, Self::Error> {
+        Ok(ShouldRestart::No)
     }
 
     /// Hook that is called before the actor is stopped.
@@ -141,9 +162,32 @@ pub trait Actor: Sized {
     ///
     /// # Returns
     /// A result indicating the successful cleanup or an error if the cleanup process fails.
-    async fn pre_stop(self, _reason: ActorStopReason<Self::Error>) -> Result<(), Self::Error> {
+    async fn on_stop(self, _reason: ActorStopReason) -> Result<(), Self::Error> {
         debug!("stopping actor {}", any::type_name::<Self>());
         Ok(())
+    }
+
+    /// Hook that is called when a linked actor dies.
+    ///
+    /// By default, the current actor will be stopped if the reason is anything other than normal.
+    ///
+    /// # Returns
+    /// Whether the actor should be stopped or not.
+    async fn on_link_died(
+        &self,
+        id: u64,
+        reason: ActorStopReason,
+    ) -> Result<ShouldStop, Self::Error> {
+        match reason {
+            ActorStopReason::Normal => {
+                debug!("linked actor {id} stopped normally");
+                Ok(ShouldStop::No)
+            }
+            ActorStopReason::Panicked | ActorStopReason::LinkDied { .. } => {
+                debug!("linked actor {id} stopped with error");
+                Ok(ShouldStop::Yes)
+            }
+        }
     }
 }
 
@@ -153,9 +197,10 @@ pub trait Actor: Sized {
 /// Implementing this trait enables the creation and management of actor instances.
 ///
 /// This trait is automatically implemented by the [`actor`] macro.
+#[async_trait]
 pub trait Spawn {
     /// The type of reference to the actor, allowing for message sending and interaction.
-    type Ref;
+    type Ref: ActorRef;
 
     /// Spawns an actor, creating a new instance of it.
     ///
@@ -166,6 +211,11 @@ pub trait Spawn {
     /// # Returns
     /// A reference to the spawned actor, of the type specified by `Self::Ref`.
     fn spawn(self) -> Self::Ref;
+
+    /// Spawns an actor with a bidirectional link between the current actor and the child.
+    ///
+    /// If either actor dies, [`Actor::on_link_died`] will be called on the other actor.
+    async fn spawn_link(self) -> Result<Self::Ref, ActorError>;
 
     /// Retrieves a reference to the current actor.
     ///
@@ -192,7 +242,29 @@ pub trait Spawn {
 
 /// Provides functionality to stop and wait for an actor to complete based on an actor ref.
 #[async_trait]
-pub trait ActorRef {
+pub trait ActorRef: Send + Sync {
+    /// Returns the actor identifier.
+    fn id(&self) -> u64;
+
+    /// Returns whether the actor is currently alive.
+    fn is_alive(&self) -> bool;
+
+    /// Links the actor with another.
+    ///
+    /// If either actor dies, [`Actor::on_link_died`] will be called on the other actor.
+    async fn link<R: ActorRef + Into<GenericActorRef>>(
+        &self,
+        actor_ref: R,
+    ) -> Result<(), ActorError>;
+
+    /// Unlinks the actor with a previously linked actor.
+    async fn unlink<R: ActorRef>(&self, actor_ref: &R) -> Result<(), ActorError>;
+
+    /// Notifies the actor that one of its links died.
+    ///
+    /// This is called automatically when an actor dies.
+    async fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), ActorError>;
+
     /// Signals the actor to stop after processing all messages currently in its mailbox.
     ///
     /// This method sends a special stop message to the end of the actor's mailbox, ensuring
@@ -232,26 +304,48 @@ pub trait ActorRef {
     async fn wait_for_stop(&self);
 }
 
-/// Reason for an actor being stopped.
+/// Enum indiciating if an actor should be restarted or not after panicking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActorStopReason<E> {
+pub enum ShouldRestart {
+    /// The actor should be restarted.
+    Yes,
+    /// The actor should stop.
+    No,
+}
+
+/// Enum indiciating if an actor should be stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShouldStop {
+    /// The actor should be stopped.
+    Yes,
+    /// The actor should not be stopped.
+    No,
+}
+
+/// Reason for an actor being stopped.
+#[derive(Clone, Debug)]
+pub enum ActorStopReason {
     /// Actor stopped normally.
     Normal,
     /// Actor panicked.
     Panicked,
-    /// Actor failed to start.
-    StartFailed(E),
-    /// Actor failed to restart.
-    RestartFailed(E),
+    /// Link died.
+    LinkDied {
+        /// Actor ID.
+        id: u64,
+        /// Actor died reason.
+        reason: Box<ActorStopReason>,
+    },
 }
 
-impl<E: fmt::Display> fmt::Display for ActorStopReason<E> {
+impl fmt::Display for ActorStopReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActorStopReason::Normal => write!(f, "actor stopped normally"),
             ActorStopReason::Panicked => write!(f, "actor panicked"),
-            ActorStopReason::StartFailed(err) => write!(f, "actor failed to start: {err}"),
-            ActorStopReason::RestartFailed(err) => write!(f, "actor failed to restart: {err}"),
+            ActorStopReason::LinkDied { id, reason } => {
+                write!(f, "link #{id} died with reason: {}", reason.as_ref())
+            }
         }
     }
 }
@@ -299,30 +393,168 @@ impl<E> fmt::Display for ActorError<E> {
 
 impl<E: fmt::Debug> std::error::Error for ActorError<E> {}
 
+static ACTOR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub fn new_actor_id() -> u64 {
+    ACTOR_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+tokio::task_local! {
+    #[doc(hidden)]
+    pub static CURRENT_ACTOR: GenericActorRef;
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GenericActorRef {
+    pub id: u64,
+    pub mailbox: mpsc::Sender<Signal<()>>,
+    pub stop_notify: Arc<Notify>,
+}
+
+impl GenericActorRef {
+    pub fn current() -> Self {
+        CURRENT_ACTOR.with(|actor_ref| actor_ref.clone())
+    }
+
+    pub fn try_current() -> Option<Self> {
+        CURRENT_ACTOR.try_with(|actor_ref| actor_ref.clone()).ok()
+    }
+
+    pub fn from_parts<M>(
+        id: u64,
+        channel: mpsc::Sender<Signal<M>>,
+        stop_notify: Arc<Notify>,
+    ) -> Self {
+        GenericActorRef {
+            id,
+            mailbox: unsafe { mem::transmute(channel) },
+            stop_notify,
+        }
+    }
+
+    pub fn into_parts<M>(self) -> (u64, mpsc::Sender<Signal<M>>, Arc<Notify>) {
+        (
+            self.id,
+            unsafe { mem::transmute(self.mailbox) },
+            self.stop_notify,
+        )
+    }
+
+    async fn signal(&self, signal: Signal<()>) -> Result<(), ActorError> {
+        self.mailbox
+            .send(signal)
+            .await
+            .map_err(|_| ActorError::ActorNotRunning(()))
+    }
+}
+
+#[async_trait]
+impl ActorRef for GenericActorRef {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn is_alive(&self) -> bool {
+        self.mailbox.is_closed()
+    }
+
+    async fn link<R: ActorRef + Into<GenericActorRef>>(
+        &self,
+        actor_ref: R,
+    ) -> Result<(), ActorError> {
+        self.signal(Signal::Link(actor_ref.into())).await
+    }
+
+    async fn unlink<R: ActorRef>(&self, actor_ref: &R) -> Result<(), ActorError> {
+        self.signal(Signal::Unlink(actor_ref.id())).await
+    }
+
+    async fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), ActorError> {
+        self.signal(Signal::LinkDied(id, reason)).await
+    }
+
+    async fn stop_gracefully(&self) -> Result<(), ActorError> {
+        self.signal(Signal::Stop).await
+    }
+
+    fn stop_immediately(&self) {
+        self.stop_notify.notify_waiters();
+    }
+
+    async fn wait_for_stop(&self) {
+        self.mailbox.closed().await;
+    }
+}
+
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
 pub enum Signal<M> {
     Message(M),
     Stop,
+    Link(GenericActorRef),
+    Unlink(u64),
+    LinkDied(u64, ActorStopReason),
 }
 
 #[doc(hidden)]
 pub async fn run_actor_lifecycle<A, M, F>(
+    id: u64,
     mut actor: A,
     mut rx: mpsc::Receiver<Signal<M>>,
     stop_notify: Arc<Notify>,
-    handle_messages: F,
+    handle_message: F,
 ) where
-    A: Actor + Send,
-    F: for<'a> Fn(&'a mut A, &'a mut mpsc::Receiver<Signal<M>>) -> BoxFuture<'a, ()>,
+    A: Actor + Send + Sync,
+    F: for<'a> Fn(&'a mut A, M) -> BoxFuture<'a, ()>,
 {
-    if let Err(err) = actor.pre_start().await {
-        let _ = actor.pre_stop(ActorStopReason::StartFailed(err)).await;
+    let mut links = HashMap::new();
+
+    if let Err(_err) = actor.on_start(id).await {
+        let _ = actor.on_stop(ActorStopReason::Panicked).await;
         return;
     }
 
     let reason = loop {
-        let nest_signal_fut = AssertUnwindSafe(handle_messages(&mut actor, &mut rx)).catch_unwind();
+        let nest_signal_fut = AssertUnwindSafe({
+            let actor = &mut actor;
+            let links = &mut links;
+            let rx = &mut rx;
+            let handle_message = &handle_message;
+            async move {
+                while let Some(signal) = rx.recv().await {
+                    match signal {
+                        Signal::Message(msg) => handle_message(actor, msg).await,
+                        Signal::Stop => break,
+                        Signal::Link(actor_ref) => {
+                            links.insert(actor_ref.id(), actor_ref);
+                        }
+                        Signal::Unlink(id) => {
+                            links.remove(&id);
+                        }
+                        Signal::LinkDied(id, reason) => {
+                            match actor.on_link_died(id, reason.clone()).await {
+                                Ok(ShouldStop::Yes) => {
+                                    return ActorStopReason::LinkDied {
+                                        id,
+                                        reason: Box::new(reason),
+                                    }
+                                }
+                                Ok(ShouldStop::No) => {}
+                                Err(err) => {
+                                    error!("on_link_died hook error: {err:?}");
+                                    return ActorStopReason::Panicked;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ActorStopReason::Normal
+            }
+        })
+        .catch_unwind();
         tokio::select! {
             biased;
             _ = stop_notify.notified() => {
@@ -330,17 +562,12 @@ pub async fn run_actor_lifecycle<A, M, F>(
             }
             res = nest_signal_fut => {
                 match res {
-                    Ok(()) => break ActorStopReason::Normal,
-                    Err(err) => match actor.pre_restart(err).await {
-                        Ok(should_restart) => {
-                            if should_restart == true {
-                                continue;
-                            }
-
+                    Ok(reason) => break reason,
+                    Err(err) => match actor.on_panic(err).await {
+                        Ok(ShouldRestart::Yes) => continue,
+                        Ok(ShouldRestart::No) => break ActorStopReason::Panicked,
+                        Err(_err) => {
                             break ActorStopReason::Panicked;
-                        }
-                        Err(err) => {
-                            break ActorStopReason::RestartFailed(err);
                         }
                     },
                 }
@@ -348,7 +575,11 @@ pub async fn run_actor_lifecycle<A, M, F>(
         }
     };
 
-    if let Err(_) = actor.pre_stop(reason).await {
-        return;
+    if let Err(err) = actor.on_stop(reason.clone()).await {
+        error!("on_stop hook error: {err:?}");
+    }
+
+    for link in links.values() {
+        let _ = link.notify_link_died(id, reason.clone()).await;
     }
 }
