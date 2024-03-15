@@ -32,6 +32,12 @@ struct Message {
     generics: Generics,
 }
 
+impl Message {
+    fn has_lifetime(&self) -> bool {
+        self.generics.lifetimes().count() > 0
+    }
+}
+
 impl From<(Visibility, Signature)> for Message {
     fn from((vis, sig): (Visibility, Signature)) -> Self {
         let variant = format_ident!("{}", sig.ident.to_string().to_upper_camel_case());
@@ -311,7 +317,7 @@ impl Actor {
         } = self;
 
         let methods = messages.iter().enumerate().map(
-            |(i, Message {
+            |msg @ (i, Message {
                  vis,
                  sig,
                  variant,
@@ -413,7 +419,54 @@ impl Actor {
                     try_async_sig.ident
                 );
 
+                let async_methods = (!msg.1.has_lifetime()).then(|| quote! {
+                    #[doc = "Sends the message asynchronously, not waiting for a response."]
+                    #[allow(non_snake_case)]
+                    #vis #async_sig {
+                        #mailbox
+                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                __reply: ::std::option::Option::None,
+                                #( #field_idents ),*
+                            }))
+                            .await
+                            .map_err(|err| #map_err)?;
+
+                        ::std::result::Result::Ok(())
+                    }
+
+                    #[doc = "Sends the message asyncronously with a timeout for mailbox capacity."]
+                    #[allow(non_snake_case)]
+                    #vis #async_timeout_sig {
+                        #mailbox
+                            .send_timeout(
+                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                    __reply: ::std::option::Option::None,
+                                    #( #field_idents ),*
+                                }),
+                                timeout,
+                            )
+                            .await
+                            .map_err(|err| #timeout_map_err)?;
+
+                        ::std::result::Result::Ok(())
+                    }
+
+                    #[doc = "Attempts to immediately send the message asyncronously without waiting for a response or mailbox capacity."]
+                    #[allow(non_snake_case)]
+                    #vis #try_async_sig {
+                        #mailbox
+                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                __reply: ::std::option::Option::None,
+                                #( #field_idents ),*
+                            }))
+                            .map_err(|err| #try_map_err)?;
+
+                        ::std::result::Result::Ok(())
+                    }
+                });
+
                 quote! {
+                    #[doc = "Sends the messages, waits for processing, and returns a response."]
                     #[allow(non_snake_case)]
                     #vis #sig {
                         ::std::debug_assert!(
@@ -433,6 +486,7 @@ impl Actor {
                         rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
                     }
 
+                    #[doc = "Sends the message with a timeout for adding to the mailbox if the mailbox is full."]
                     #[allow(non_snake_case)]
                     #vis #timeout_sig {
                         ::std::debug_assert!(
@@ -455,6 +509,7 @@ impl Actor {
                         rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
                     }
 
+                    #[doc = "Attempts to send the message immediately without waiting for mailbox capacity."]
                     #[allow(non_snake_case)]
                     #vis #try_sig {
                         ::std::debug_assert!(
@@ -473,46 +528,7 @@ impl Actor {
                         rx.await.map_err(|_| ::simpl_actor::ActorError::ActorStopped)
                     }
 
-                    #[allow(non_snake_case)]
-                    #vis #async_sig {
-                        #mailbox
-                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
-                                __reply: ::std::option::Option::None,
-                                #( #field_idents ),*
-                            }))
-                            .await
-                            .map_err(|err| #map_err)?;
-
-                        ::std::result::Result::Ok(())
-                    }
-
-                    #[allow(non_snake_case)]
-                    #vis #async_timeout_sig {
-                        #mailbox
-                            .send_timeout(
-                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
-                                    __reply: ::std::option::Option::None,
-                                    #( #field_idents ),*
-                                }),
-                                timeout,
-                            )
-                            .await
-                            .map_err(|err| #timeout_map_err)?;
-
-                        ::std::result::Result::Ok(())
-                    }
-
-                    #[allow(non_snake_case)]
-                    #vis #try_async_sig {
-                        #mailbox
-                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
-                                __reply: ::std::option::Option::None,
-                                #( #field_idents ),*
-                            }))
-                            .map_err(|err| #try_map_err)?;
-
-                        ::std::result::Result::Ok(())
-                    }
+                    #async_methods
                 }
             },
         );
@@ -590,16 +606,18 @@ impl Actor {
                 }
 
                 fn into_generic(self) -> ::simpl_actor::GenericActorRef {
-                    ::simpl_actor::GenericActorRef::from_parts(
-                        self.id,
-                        self.mailbox,
-                        self.stop_notify,
-                        self.links,
-                    )
+                    unsafe {
+                        ::simpl_actor::GenericActorRef::from_parts(
+                            self.id,
+                            self.mailbox,
+                            self.stop_notify,
+                            self.links,
+                        )
+                    }
                 }
 
                 fn from_generic(actor_ref: ::simpl_actor::GenericActorRef) -> Self {
-                    let (id, mailbox, stop_notify, links) = actor_ref.into_parts();
+                    let (id, mailbox, stop_notify, links) = unsafe { actor_ref.into_parts() };
                     #actor_ref_ident {
                         id,
                         mailbox,
