@@ -78,6 +78,7 @@ impl MyActorRef {
 ```
 
 **Async variants (`_async`, `_async_timeout`, and `try_async`) are only generated if the method does not have any lifetimes.**
+
 In other words, all parameters must be owned or `&'static` for async variants to be generated, otherwise the actor might reference deallocated memory causing UB.
 
 These variants provide a range of options for how and when messages are processed by the actor, from synchronous waiting to non-blocking attempts, with or without timeouts.

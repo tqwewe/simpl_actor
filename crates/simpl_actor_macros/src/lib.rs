@@ -7,7 +7,7 @@ use proc_macro::TokenStream;
 use quote::ToTokens;
 use syn::parse_macro_input;
 
-/// Attribute macro placed on `impl` blocks of actors to defined messages.
+/// Attribute macro placed on `impl` blocks of actors to define messages.
 ///
 /// Methods on the impl block are marked with `#[message]`, allowing them to be called on the actor.
 ///

@@ -12,7 +12,6 @@ keywords = ["actor", "macro", "tokio"]
 [dependencies]
 simpl_actor_macros = { path = "../simpl_actor_macros", version = "0.2.3" }
 
-async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"

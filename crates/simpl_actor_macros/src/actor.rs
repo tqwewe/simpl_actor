@@ -195,7 +195,7 @@ impl Actor {
 
         quote! {
             match err.0 {
-                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                ::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                     __reply: _,
                     #field_idents
                 }) => ::simpl_actor::ActorError::ActorNotRunning((
@@ -223,7 +223,7 @@ impl Actor {
         quote! {
             match err {
                 ::tokio::sync::mpsc::error::TrySendError::Full(
-                    ::simpl_actor::Signal::Message(
+                    ::simpl_actor::internal::Signal::Message(
                         #actor_msg_ident::#variant {
                             __reply: _,
                             #field_idents
@@ -233,7 +233,7 @@ impl Actor {
                     #field_idents
                 )),
                 ::tokio::sync::mpsc::error::TrySendError::Closed(
-                    ::simpl_actor::Signal::Message(
+                    ::simpl_actor::internal::Signal::Message(
                         #actor_msg_ident::#variant {
                             __reply: _,
                             #field_idents
@@ -264,7 +264,7 @@ impl Actor {
         quote! {
             match err {
                 ::tokio::sync::mpsc::error::SendTimeoutError::Closed(
-                    ::simpl_actor::Signal::Message(
+                    ::simpl_actor::internal::Signal::Message(
                         #actor_msg_ident::#variant {
                             __reply: _,
                             #field_idents
@@ -274,7 +274,7 @@ impl Actor {
                     #field_idents
                 )),
                 ::tokio::sync::mpsc::error::SendTimeoutError::Timeout(
-                    ::simpl_actor::Signal::Message(
+                    ::simpl_actor::internal::Signal::Message(
                         #actor_msg_ident::#variant {
                             __reply: _,
                             #field_idents
@@ -300,8 +300,8 @@ impl Actor {
             #[derive(Clone, Debug)]
             pub struct #actor_ref_ident {
                 id: u64,
-                mailbox: ::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident #actor_msg_generics>>,
-                stop_notify: ::std::sync::Arc<::tokio::sync::Notify>,
+                mailbox: ::tokio::sync::mpsc::Sender<::simpl_actor::internal::Signal<#actor_msg_ident #actor_msg_generics>>,
+                stop_tx: ::std::sync::Arc<::tokio::sync::watch::Sender<()>>,
                 links: ::std::sync::Arc<::tokio::sync::Mutex<::std::collections::HashMap<u64, ::simpl_actor::GenericActorRef>>>,
             }
         }
@@ -353,7 +353,7 @@ impl Actor {
                     }).collect();
                     let all_generics = (!generic_params.is_empty()).then_some(quote! { < #generic_params > });
                     quote! {{
-                        let mailbox: &::tokio::sync::mpsc::Sender<::simpl_actor::Signal<#actor_msg_ident #all_generics>> =
+                        let mailbox: &::tokio::sync::mpsc::Sender<::simpl_actor::internal::Signal<#actor_msg_ident #all_generics>> =
                             unsafe { ::std::mem::transmute(&self.mailbox) };
                         mailbox
                     }}
@@ -424,7 +424,7 @@ impl Actor {
                     #[allow(non_snake_case)]
                     #vis #async_sig {
                         #mailbox
-                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                            .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
                             }))
@@ -439,7 +439,7 @@ impl Actor {
                     #vis #async_timeout_sig {
                         #mailbox
                             .send_timeout(
-                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                ::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                     __reply: ::std::option::Option::None,
                                     #( #field_idents ),*
                                 }),
@@ -455,7 +455,7 @@ impl Actor {
                     #[allow(non_snake_case)]
                     #vis #try_async_sig {
                         #mailbox
-                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                            .try_send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
                             }))
@@ -476,7 +476,7 @@ impl Actor {
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         #mailbox
-                            .send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                            .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
                             }))
@@ -497,7 +497,7 @@ impl Actor {
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         #mailbox
                             .send_timeout(
-                                ::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                                ::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                     __reply: ::std::option::Option::Some(reply),
                                     #( #field_idents ),*
                                 }),
@@ -519,7 +519,7 @@ impl Actor {
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         #mailbox
-                            .try_send(::simpl_actor::Signal::Message(#actor_msg_ident::#variant {
+                            .try_send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
                             }))
@@ -548,7 +548,6 @@ impl Actor {
 
         quote! {
             #[automatically_derived]
-            #[::async_trait::async_trait]
             impl ::simpl_actor::ActorRef for #actor_ref_ident {
                 fn id(&self) -> u64 {
                     self.id
@@ -559,22 +558,22 @@ impl Actor {
                 }
 
                 async fn link_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
-                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(self.clone());
+                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
                     ::simpl_actor::ActorRef::link_child(&this_actor_ref, child).await
                 }
 
                 async fn unlink_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
-                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(self.clone());
+                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
                     ::simpl_actor::ActorRef::unlink_child(&this_actor_ref, child).await
                 }
 
                 async fn link_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
-                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(self.clone());
+                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
                     ::simpl_actor::ActorRef::link_together(&this_actor_ref, actor_ref).await
                 }
 
                 async fn unlink_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
-                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(self.clone());
+                    let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
                     ::simpl_actor::ActorRef::unlink_together(&this_actor_ref, actor_ref).await
                 }
 
@@ -584,7 +583,7 @@ impl Actor {
                     reason: ::simpl_actor::ActorStopReason,
                 ) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
                     self.mailbox
-                        .send(::simpl_actor::Signal::LinkDied(id, reason))
+                        .send(::simpl_actor::internal::Signal::LinkDied(id, reason))
                         .await
                         .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
                 }
@@ -592,13 +591,15 @@ impl Actor {
                 async fn stop_gracefully(&self) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
                     self
                         .mailbox
-                        .send(::simpl_actor::Signal::Stop)
+                        .send(::simpl_actor::internal::Signal::Stop)
                         .await
                         .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
                 }
 
-                fn stop_immediately(&self) {
-                    self.stop_notify.notify_waiters();
+                fn stop_immediately(&self) -> ::std::result::Result<(), ::simpl_actor::ActorError> {
+                    self.stop_tx
+                        .send(())
+                        .map_err(|_| ::simpl_actor::ActorError::ActorNotRunning(()))
                 }
 
                 async fn wait_for_stop(&self) {
@@ -610,18 +611,18 @@ impl Actor {
                         ::simpl_actor::GenericActorRef::from_parts(
                             self.id,
                             self.mailbox,
-                            self.stop_notify,
+                            self.stop_tx,
                             self.links,
                         )
                     }
                 }
 
                 fn from_generic(actor_ref: ::simpl_actor::GenericActorRef) -> Self {
-                    let (id, mailbox, stop_notify, links) = unsafe { actor_ref.into_parts() };
+                    let (id, mailbox, stop_tx, links) = unsafe { actor_ref.into_parts() };
                     #actor_ref_ident {
                         id,
                         mailbox,
-                        stop_notify,
+                        stop_tx,
                         links,
                     }
                 }
@@ -682,7 +683,6 @@ impl Actor {
             }
 
             #[automatically_derived]
-            #[::async_trait::async_trait]
             impl ::simpl_actor::Spawn for #ident {
                 type Ref = #actor_ref_ident;
 
@@ -698,27 +698,28 @@ impl Actor {
                         })
                     }
 
-                    let id = ::simpl_actor::new_actor_id();
+                    let id = ::simpl_actor::internal::new_actor_id();
                     let (tx, rx) =
                         ::tokio::sync::mpsc::channel(<Self as ::simpl_actor::Actor>::mailbox_size());
-                    let stop_notify = ::std::sync::Arc::new(::tokio::sync::Notify::new());
+                    let (stop_tx, stop_rx) = ::tokio::sync::watch::channel(());
+                    let stop_tx = ::std::sync::Arc::new(stop_tx);
                     let links = ::std::sync::Arc::new(::tokio::sync::Mutex::new(::std::collections::HashMap::new()));
                     let actor_ref = #actor_ref_ident {
                         id,
                         mailbox: tx,
-                        stop_notify: ::std::sync::Arc::clone(&stop_notify),
+                        stop_tx,
                         links: ::std::sync::Arc::clone(&links),
                     };
                     let generic_actor_ref: ::simpl_actor::GenericActorRef =
-                        ::simpl_actor::ActorRef::into_generic(actor_ref.clone());
+                        ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(&actor_ref));
 
-                    ::tokio::spawn(#actor_ref_global_ident.scope(actor_ref.clone(), async move {
+                    ::tokio::spawn(#actor_ref_global_ident.scope(::std::clone::Clone::clone(&actor_ref), async move {
                         ::simpl_actor::CURRENT_ACTOR.scope(generic_actor_ref, async move {
-                            ::simpl_actor::run_actor_lifecycle::<Self, #actor_msg_ident #actor_msg_generics, _>(
+                            ::simpl_actor::internal::run_actor_lifecycle::<Self, #actor_msg_ident #actor_msg_generics, _>(
                                 id,
                                 self,
                                 rx,
-                                stop_notify,
+                                stop_rx,
                                 links,
                                 handle_message,
                             ).await
@@ -757,7 +758,7 @@ impl Actor {
                 }
 
                 fn try_actor_ref() -> ::std::option::Option<Self::Ref> {
-                    #actor_ref_global_ident.try_with(|actor_ref| actor_ref.clone()).ok()
+                    #actor_ref_global_ident.try_with(|actor_ref| ::std::clone::Clone::clone(actor_ref)).ok()
                 }
             }
         }

@@ -1,17 +1,13 @@
-use std::{
-    any::{self, Any},
-    convert::Infallible,
-    time::Duration,
-};
+//! This example shows a basic actor with different messages.
 
-use async_trait::async_trait;
-use simpl_actor::{actor, Actor, ActorError, ActorRef, ActorStopReason, ShouldRestart, Spawn};
+use std::{any, convert::Infallible, time::Duration};
+
+use simpl_actor::*;
 
 pub struct CounterActor {
     count: i64,
 }
 
-#[async_trait]
 impl Actor for CounterActor {
     type Error = Infallible;
 
@@ -20,7 +16,7 @@ impl Actor for CounterActor {
         Ok(())
     }
 
-    async fn on_panic(&mut self, _err: Box<dyn Any + Send>) -> Result<ShouldRestart, Self::Error> {
+    async fn on_panic(&mut self, _err: PanicErr) -> Result<ShouldRestart, Self::Error> {
         println!("restarting actor {}", any::type_name::<Self>());
         Ok(ShouldRestart::Yes)
     }

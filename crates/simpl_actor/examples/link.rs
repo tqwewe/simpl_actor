@@ -1,8 +1,11 @@
+//! This example demonstrates how actors can be linked with one another.
+//!
+//! If actors are linked, then they will be notified if the other dies.
+
 use std::convert::Infallible;
 
-use async_trait::async_trait;
 use futures::future::join;
-use simpl_actor::{actor, Actor, ActorError, ActorRef, ActorStopReason, ShouldStop, Spawn};
+use simpl_actor::*;
 
 #[derive(Default)]
 pub struct MyActor {
@@ -22,7 +25,6 @@ impl MyActor {
     }
 }
 
-#[async_trait]
 impl Actor for MyActor {
     type Error = Infallible;
 
@@ -47,7 +49,7 @@ impl Actor for MyActor {
                 println!("linked actor {id} stopped normally");
                 Ok(ShouldStop::No)
             }
-            ActorStopReason::Panicked | ActorStopReason::LinkDied { .. } => {
+            ActorStopReason::Panicked(_) | ActorStopReason::LinkDied { .. } => {
                 println!("linked actor {id} stopped with error, stopping");
                 Ok(ShouldStop::Yes)
             }
