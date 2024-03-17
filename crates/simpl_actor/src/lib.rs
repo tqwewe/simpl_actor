@@ -2,10 +2,10 @@
 //!
 //! # Features
 //!
-//! - Simple Actor Definition: Define actors with minimal code using Rust structs and macros.
-//! - Automatic Message Handling: Leverages Rust's type system and async capabilities.
-//! - Asynchronous & Synchronous Messaging: Flexible interaction patterns for actors.
-//! - Lifecycle Management: Hooks for actor initialization, restart, and shutdown.
+//! - **Simple Actor Definition:** Define actors with minimal code using Rust structs and macros.
+//! - **Automatic Message Handling:** Leverages Rust's type system and async capabilities.
+//! - **Asynchronous & Synchronous Messaging:** Flexible interaction patterns for actors.
+//! - **Lifecycle Management:** Hooks for actor initialization, restart, and shutdown.
 //!
 //! # Quick Start
 //!
@@ -21,51 +21,44 @@
 //!     pub fn inc(&mut self, amount: i64) { ... }
 //!
 //!     #[message]
-//!     pub fn count(&self) -> i64 { ... }
+//!     pub fn inc(&mut self, amount: i64) { ... }
 //!
-//!     #[message]
-//!     pub async fn fetch(&self) -> String { ... }
+//!     #[message(infallible)]
+//!     pub fn count(&self) -> i64 { ... }
 //! }
 //!
-//! let actor = CounterActor::default().spawn();
-//! actor.inc(1).await?;
-//! actor.count().await?; // Returns 1
-//! actor.fetch().await?;
+//! let counter = CounterActor::new();
+//! let actor = counter.spawn();
+//!
+//! actor.inc(2).await?;
+//! actor.dec(1).await?;
+//! let count = actor.count().await?;
 //! ```
 //!
 //! # Messaging Variants
 //!
-//! When you define a message in `simpl_actor`, six variants of the message handling function are
-//! automatically generated to offer flexibility in how messages are sent and processed:
+//! When you define a message in `simpl_actor`, two variants of the message handling function
+//! are automatically for syncronous and asyncronous processing:
 //!
 //! ```
 //! #[actor]
 //! impl MyActor {
 //!     #[message]
-//!     fn msg() -> i32 {}
+//!     fn msg() -> Result<i32, Err> {}
 //! }
 //!
 //! // Generates
 //! impl MyActorRef {
 //!     /// Sends the messages, waits for processing, and returns a response.
-//!     async fn msg() -> Result<i32, ActorError> {}
-//!     /// Sends the message with a timeout for adding to the mailbox if the mailbox is full.
-//!     async fn msg_timeout(timeout: Duration) -> Result<i32, ActorError> {}
-//!     /// Attempts to send the message immediately without waiting for mailbox capacity.
-//!     async fn try_msg() -> Result<i32, ActorError> {}
+//!     async fn msg() -> Result<i32, SendError> {}
 //!     /// Sends the message asynchronously, not waiting for a response.
-//!     async fn msg_async() -> Result<(), ActorError> {}
-//!     /// Sends the message asyncronously with a timeout for mailbox capacity.
-//!     async fn msg_async_timeout(timeout: Duration) -> Result<(), ActorError> {}
-//!     /// Attempts to immediately send the message asyncronously without waiting for a response or mailbox capacity.
-//!     fn try_msg_async() -> Result<(), ActorError> {}
+//!     fn msg_async() -> Result<(), SendError> {}
 //! }
 //! ```
-//! **Async variants (`_async`, `_async_timeout`, and `try_async`) are only generated if the method does not have any lifetimes.**
+//! **The \_async variant is only generated if the method does not have any lifetimes.**
 //!
-//! In other words, all parameters must be owned or `&'static` for async variants to be generated, otherwise the actor might reference deallocated memory causing UB.
-//!
-//! These variants provide a range of options for how and when messages are processed by the actor, from synchronous waiting to non-blocking attempts, with or without timeouts.
+//! In other words, all parameters must be owned or `&'static` for the async variant to be generated,
+//! otherwise the actor might reference deallocated memory causing UB.
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -80,7 +73,6 @@ mod err;
 pub mod internal;
 mod reason;
 mod spawn;
-mod stop_error_hook;
 
 pub use simpl_actor_macros::{actor, Actor};
 
@@ -89,4 +81,3 @@ pub use actor_ref::*;
 pub use err::*;
 pub use reason::*;
 pub use spawn::*;
-pub use stop_error_hook::*;

@@ -7,6 +7,8 @@ use crate::err::PanicErr;
 pub enum ActorStopReason {
     /// Actor stopped normally.
     Normal,
+    /// Actor was killed.
+    Killed,
     /// Actor panicked.
     Panicked(PanicErr),
     /// Link died.
@@ -22,6 +24,7 @@ impl fmt::Debug for ActorStopReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActorStopReason::Normal => write!(f, "Normal"),
+            ActorStopReason::Killed => write!(f, "Killed"),
             ActorStopReason::Panicked(_) => write!(f, "Panicked"),
             ActorStopReason::LinkDied { id, reason } => f
                 .debug_struct("LinkDied")
@@ -36,6 +39,7 @@ impl fmt::Display for ActorStopReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActorStopReason::Normal => write!(f, "actor stopped normally"),
+            ActorStopReason::Killed => write!(f, "actor was killed"),
             ActorStopReason::Panicked(_) => write!(f, "actor panicked"),
             ActorStopReason::LinkDied { id, reason } => {
                 write!(f, "link {id} died with reason: {}", reason.as_ref())

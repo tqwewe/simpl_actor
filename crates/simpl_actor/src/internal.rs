@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     collections::HashMap,
     convert,
     panic::AssertUnwindSafe,
@@ -9,15 +8,18 @@ use std::{
     },
 };
 
-use futures::{future::BoxFuture, FutureExt, TryFutureExt};
-use tokio::sync::{mpsc, watch, Mutex};
+use futures::{
+    future::BoxFuture,
+    stream::{AbortRegistration, Abortable},
+    FutureExt,
+};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{
-    actor::{Actor, ShouldRestart, ShouldStop},
+    actor::Actor,
     actor_ref::{ActorRef, GenericActorRef},
     err::PanicErr,
     reason::ActorStopReason,
-    stop_error_hook::StopErrorHook,
 };
 
 static ACTOR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -36,48 +38,66 @@ pub fn new_actor_id() -> u64 {
 pub async fn run_actor_lifecycle<A, M, F>(
     id: u64,
     mut actor: A,
-    mut rx: mpsc::Receiver<Signal<M>>,
-    mut stop_rx: watch::Receiver<()>,
+    mailbox_rx: mpsc::UnboundedReceiver<Signal<M>>,
+    abort_registration: AbortRegistration,
     links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     handle_message: F,
 ) where
     A: Actor + Send,
-    F: for<'a> Fn(&'a mut A, M) -> BoxFuture<'a, ()>,
+    F: for<'a> Fn(&'a mut A, M) -> BoxFuture<'a, Option<ActorStopReason>>,
 {
-    if let Err(err) = AssertUnwindSafe(actor.on_start(id)).catch_unwind().await {
-        let on_stop_res = AssertUnwindSafe(
-            actor
-                .on_stop(ActorStopReason::Panicked(PanicErr::new_boxed(err)))
-                .map_err(|err| Box::new(err) as Box<dyn Any + Send>),
-        )
+    let start_res = AssertUnwindSafe(actor.on_start())
         .catch_unwind()
         .await
+        .map(|res| res.map_err(|err| PanicErr::new(err)))
+        .map_err(PanicErr::new_boxed)
         .and_then(convert::identity);
-        if let Err(err) = on_stop_res {
-            StopErrorHook::call_hook(id, Box::new(err)).await;
-        }
+    if let Err(err) = start_res {
+        actor.on_stop(ActorStopReason::Panicked(err)).await.unwrap();
         return;
     }
 
-    let reason = loop {
-        let process_fut = AssertUnwindSafe({
+    let reason = Abortable::new(
+        run_abortable_future(&mut actor, mailbox_rx, handle_message),
+        abort_registration,
+    )
+    .await
+    .unwrap_or(ActorStopReason::Killed);
+
+    for (_, actor_ref) in links.lock().await.drain() {
+        let _ = actor_ref.notify_link_died(id, reason.clone());
+    }
+
+    actor.on_stop(reason.clone()).await.unwrap();
+}
+
+async fn run_abortable_future<A, M, F>(
+    mut actor: &mut A,
+    mut mailbox_rx: mpsc::UnboundedReceiver<Signal<M>>,
+    handle_message: F,
+) -> ActorStopReason
+where
+    A: Actor + Send,
+    F: for<'a> Fn(&'a mut A, M) -> BoxFuture<'a, Option<ActorStopReason>>,
+{
+    loop {
+        let res = AssertUnwindSafe({
             let actor = &mut actor;
-            let rx = &mut rx;
+            let mailbox_rx = &mut mailbox_rx;
             let handle_message = &handle_message;
             async move {
-                while let Some(signal) = rx.recv().await {
+                while let Some(signal) = mailbox_rx.recv().await {
                     match signal {
-                        Signal::Message(msg) => handle_message(actor, msg).await,
-                        Signal::Stop => break,
+                        Signal::Message(msg) => {
+                            if let Some(reason) = handle_message(actor, msg).await {
+                                return reason;
+                            }
+                        }
+                        Signal::Stop => return ActorStopReason::Normal,
                         Signal::LinkDied(id, reason) => {
                             match actor.on_link_died(id, reason.clone()).await {
-                                Ok(ShouldStop::Yes) => {
-                                    return ActorStopReason::LinkDied {
-                                        id,
-                                        reason: Box::new(reason),
-                                    }
-                                }
-                                Ok(ShouldStop::No) => {}
+                                Ok(Some(reason)) => return reason,
+                                Ok(None) => {}
                                 Err(err) => {
                                     return ActorStopReason::Panicked(PanicErr::new(err));
                                 }
@@ -89,41 +109,18 @@ pub async fn run_actor_lifecycle<A, M, F>(
                 ActorStopReason::Normal
             }
         })
-        .catch_unwind();
-        tokio::select! {
-            biased;
-            _ = stop_rx.changed() => {
-                break ActorStopReason::Normal;
-            }
-            res = process_fut => {
-                match res {
-                    Ok(reason) => break reason,
-                    Err(err) => {
-                        let panic_err = PanicErr::new_boxed(err);
-                        match actor.on_panic(panic_err.clone()).await {
-                            Ok(ShouldRestart::Yes) => continue,
-                            Ok(ShouldRestart::No) => break ActorStopReason::Panicked(panic_err),
-                            Err(err) => break ActorStopReason::Panicked(PanicErr::new(err)),
-                        }
-                    },
+        .catch_unwind()
+        .await;
+        match res {
+            Ok(reason) => break reason,
+            Err(err) => {
+                let panic_err = PanicErr::new_boxed(err);
+                match actor.on_panic(panic_err.clone()).await {
+                    Ok(Some(reason)) => return reason,
+                    Ok(None) => {}
+                    Err(err) => break ActorStopReason::Panicked(PanicErr::new(err)),
                 }
             }
         }
-    };
-
-    let on_stop_res = AssertUnwindSafe(
-        actor
-            .on_stop(reason.clone())
-            .map_err(|err| Box::new(err) as Box<dyn Any + Send>),
-    )
-    .catch_unwind()
-    .await
-    .and_then(convert::identity);
-    if let Err(err) = on_stop_res {
-        StopErrorHook::call_hook(id, err).await;
-    }
-
-    for (_, actor_ref) in links.lock().await.drain() {
-        let _ = actor_ref.notify_link_died(id, reason.clone()).await;
     }
 }

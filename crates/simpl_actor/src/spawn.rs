@@ -31,26 +31,4 @@ pub trait Spawn {
     /// If the current actor dies, [Actor::on_link_died](crate::actor::Actor::on_link_died) will be called on the spawned one,
     /// however if the spawned actor dies, Actor::on_link_died will not be called.
     async fn spawn_child(self) -> Self::Ref;
-
-    /// Retrieves a reference to the current actor.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if called outside the scope of an actor.
-    ///
-    /// # Returns
-    /// A reference to the actor of type `Self::Ref`.
-    fn actor_ref(&self) -> Self::Ref {
-        match Self::try_actor_ref() {
-            Some(actor_ref) => actor_ref,
-            None => panic!("actor_ref called outside the scope of an actor"),
-        }
-    }
-
-    /// Retrieves a reference to the current actor, if available.
-    ///
-    /// # Returns
-    /// An `Option` containing a reference to the actor of type `Self::Ref` if available,
-    /// or `None` if the actor reference is not available.
-    fn try_actor_ref() -> Option<Self::Ref>;
 }

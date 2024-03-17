@@ -33,7 +33,7 @@ impl CounterActor {
     #[message]
     pub fn dec(&mut self, amount: i64) { ... }
 
-    #[message]
+    #[message(infallible)]
     pub fn count(&self) -> i64 { ... }
 }
 ```
@@ -51,37 +51,28 @@ let count = actor.count().await?;
 
 ## Messaging Variants
 
-When you define a message in `simpl_actor`, six variants of the message handling function are automatically generated to offer flexibility in how messages are sent and processed:
+When you define a message in `simpl_actor`, two variants of the message handling function are automatically for syncronous and asyncronous processing:
 
 ```rust
 #[actor]
 impl MyActor {
     #[message]
-    fn msg() -> i32 {}
-    }
+    fn msg() -> Result<i32, Err> {}
+}
 
 // Generates
 impl MyActorRef {
     /// Sends the messages, waits for processing, and returns a response.
-    async fn msg() -> Result<i32, ActorError> {}
-    /// Sends the message with a timeout for adding to the mailbox if the mailbox is full.
-    async fn msg_timeout(timeout: Duration) -> Result<i32, ActorError> {}
-    /// Attempts to send the message immediately without waiting for mailbox capacity.
-    async fn try_msg() -> Result<i32, ActorError> {}
+    async fn msg() -> Result<i32, SendError> {}
     /// Sends the message asynchronously, not waiting for a response.
-    async fn msg_async() -> Result<(), ActorError> {}
-    /// Sends the message asyncronously with a timeout for mailbox capacity.
-    async fn msg_async_timeout(timeout: Duration) -> Result<(), ActorError> {}
-    /// Attempts to immediately send the message asyncronously without waiting for a response or mailbox capacity.
-    fn try_msg_async() -> Result<(), ActorError> {}
+    fn msg_async() -> Result<(), SendError> {}
 }
 ```
 
-**Async variants (`_async`, `_async_timeout`, and `try_async`) are only generated if the method does not have any lifetimes.**
+**The \_async variant is only generated if the method does not have any lifetimes.**
 
-In other words, all parameters must be owned or `&'static` for async variants to be generated, otherwise the actor might reference deallocated memory causing UB.
-
-These variants provide a range of options for how and when messages are processed by the actor, from synchronous waiting to non-blocking attempts, with or without timeouts.
+In other words, all parameters must be owned or `&'static` for the async variant to be generated,
+otherwise the actor might reference deallocated memory causing UB.
 
 ## Contributing
 

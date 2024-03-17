@@ -6,46 +6,34 @@ use std::{
 
 /// Error that can occur when sending a message to an actor.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ActorError<E = ()> {
+pub enum SendError<E = ()> {
     /// The actor isn't running.
     ActorNotRunning(E),
     /// The actor panicked or was stopped.
     ActorStopped,
-    /// The actors mailbox is full and sending would require blocking.
-    MailboxFull(E),
-    /// The actor's mailbox remained full, and the timeout elapsed.
-    Timeout(E),
 }
 
-impl<E> fmt::Debug for ActorError<E> {
+impl<E> fmt::Debug for SendError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ActorError::ActorNotRunning(_) => {
+            SendError::ActorNotRunning(_) => {
                 write!(f, "ActorNotRunning")
             }
-            ActorError::ActorStopped => write!(f, "ActorStopped"),
-            ActorError::MailboxFull(_) => {
-                write!(f, "MailboxFull")
-            }
-            ActorError::Timeout(_) => {
-                write!(f, "Timeout")
-            }
+            SendError::ActorStopped => write!(f, "ActorStopped"),
         }
     }
 }
 
-impl<E> fmt::Display for ActorError<E> {
+impl<E> fmt::Display for SendError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ActorError::ActorNotRunning(_) => write!(f, "actor not running"),
-            ActorError::ActorStopped => write!(f, "actor stopped"),
-            ActorError::MailboxFull(_) => write!(f, "no available capacity in mailbox"),
-            ActorError::Timeout(_) => write!(f, "timed out waiting for space in mailbox"),
+            SendError::ActorNotRunning(_) => write!(f, "actor not running"),
+            SendError::ActorStopped => write!(f, "actor stopped"),
         }
     }
 }
 
-impl<E> std::error::Error for ActorError<E> {}
+impl<E> std::error::Error for SendError<E> {}
 
 /// A shared error that occurs when an actor panics or returns an error from a hook in the [Actor](crate::Actor) trait.
 #[derive(Clone)]
@@ -66,24 +54,38 @@ impl PanicErr {
         PanicErr(Arc::new(Mutex::new(err)))
     }
 
-    /// Returns some reference to the inner value if it is of type `T`, or None if it isn’t.
+    /// Calls the passed closure `f` with an option containing the boxed any type downcasted into a `Cow<'static, str>`,
+    /// or `None` if it's not a string type.
+    pub fn with_str<F, R>(
+        &self,
+        f: F,
+    ) -> Result<Option<R>, PoisonError<MutexGuard<'_, Box<dyn Any + Send>>>>
+    where
+        F: FnOnce(&str) -> R,
+    {
+        self.with(|any| {
+            any.downcast_ref::<&'static str>()
+                .copied()
+                .or_else(|| any.downcast_ref::<String>().map(String::as_str))
+                .map(|s| f(s))
+        })
+    }
+
+    /// Calls the passed closure `f` with the inner type downcasted into `T`, otherwise returns `None`.
     pub fn with_downcast_ref<T, F, R>(
         &self,
         f: F,
-    ) -> Result<R, PoisonError<MutexGuard<'_, Box<dyn Any + Send>>>>
+    ) -> Result<Option<R>, PoisonError<MutexGuard<'_, Box<dyn Any + Send>>>>
     where
         T: 'static,
-        F: FnOnce(Option<&T>) -> R,
+        F: FnOnce(&T) -> R,
     {
         let lock = self.0.lock()?;
-        Ok(f(lock.downcast_ref()))
+        Ok(lock.downcast_ref().map(f))
     }
 
     /// Returns a reference to the error as a `Box<dyn Any + Send>`.
-    pub fn with_any<F, R>(
-        &self,
-        f: F,
-    ) -> Result<R, PoisonError<MutexGuard<'_, Box<dyn Any + Send>>>>
+    pub fn with<F, R>(&self, f: F) -> Result<R, PoisonError<MutexGuard<'_, Box<dyn Any + Send>>>>
     where
         F: FnOnce(&Box<dyn Any + Send>) -> R,
     {

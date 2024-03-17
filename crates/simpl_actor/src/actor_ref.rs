@@ -1,8 +1,9 @@
 use std::{collections::HashMap, mem, sync::Arc};
 
-use tokio::sync::{mpsc, watch, Mutex};
+use futures::stream::AbortHandle;
+use tokio::sync::{mpsc, Mutex};
 
-use crate::{err::ActorError, internal::Signal, reason::ActorStopReason};
+use crate::{err::SendError, internal::Signal, reason::ActorStopReason};
 
 tokio::task_local! {
     #[doc(hidden)]
@@ -40,7 +41,7 @@ pub trait ActorRef: Clone {
     /// Notifies the actor that one of its links died.
     ///
     /// This is called automatically when an actor dies.
-    async fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), ActorError>;
+    fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError>;
 
     /// Signals the actor to stop after processing all messages currently in its mailbox.
     ///
@@ -48,18 +49,16 @@ pub trait ActorRef: Clone {
     /// that the actor will process all preceding messages before stopping. Any messages sent
     /// after this stop signal will be ignored and dropped. This approach allows for a graceful
     /// shutdown of the actor, ensuring all pending work is completed before termination.
-    async fn stop_gracefully(&self) -> Result<(), ActorError>;
+    fn stop_gracefully(&self) -> Result<(), SendError>;
 
-    /// Signals the actor to stop immediately, bypassing its mailbox.
+    /// Kills the actor immediately.
     ///
-    /// This method instructs the actor to terminate as soon as it finishes processing the
-    /// current message, if any. Messages in the mailbox that have not yet been processed
-    /// will be ignored and dropped. This method is useful for immediate shutdown scenarios
-    /// where waiting for the mailbox to empty is not feasible or desired.
+    /// This method aborts the actor immediately. Messages in the mailbox will be ignored and dropped.
     ///
-    /// Note: If the actor is in the middle of processing a message, it will complete that
-    /// message before stopping.
-    fn stop_immediately(&self) -> Result<(), ActorError>;
+    /// The actors on_stop hook will still be called.
+    ///
+    /// Note: If the actor is in the middle of processing a message, it will abort processing of that message.
+    fn kill(&self);
 
     /// Waits for the actor to finish processing and stop.
     ///
@@ -69,7 +68,7 @@ pub trait ActorRef: Clone {
     /// complete its final tasks before proceeding.
     ///
     /// Note: This method does not initiate the stop process; it only waits for the actor to
-    /// stop. You should signal the actor to stop using `stop_gracefully` or `stop_immediately`
+    /// stop. You should signal the actor to stop using `stop_gracefully` or `kill`
     /// before calling this method.
     ///
     /// # Examples
@@ -90,8 +89,8 @@ pub trait ActorRef: Clone {
 #[derive(Clone, Debug)]
 pub struct GenericActorRef {
     id: u64,
-    mailbox: mpsc::Sender<Signal<()>>,
-    stop_tx: Arc<watch::Sender<()>>,
+    mailbox: mpsc::UnboundedSender<Signal<()>>,
+    abort_handle: AbortHandle,
     links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
 }
 
@@ -106,14 +105,14 @@ impl GenericActorRef {
 
     pub unsafe fn from_parts<M>(
         id: u64,
-        channel: mpsc::Sender<Signal<M>>,
-        stop_tx: Arc<watch::Sender<()>>,
+        channel: mpsc::UnboundedSender<Signal<M>>,
+        abort_handle: AbortHandle,
         links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     ) -> Self {
         GenericActorRef {
             id,
             mailbox: mem::transmute(channel),
-            stop_tx,
+            abort_handle,
             links,
         }
     }
@@ -122,23 +121,22 @@ impl GenericActorRef {
         self,
     ) -> (
         u64,
-        mpsc::Sender<Signal<M>>,
-        Arc<watch::Sender<()>>,
+        mpsc::UnboundedSender<Signal<M>>,
+        AbortHandle,
         Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     ) {
         (
             self.id,
             mem::transmute(self.mailbox),
-            self.stop_tx,
+            self.abort_handle,
             self.links,
         )
     }
 
-    async fn signal(&self, signal: Signal<()>) -> Result<(), ActorError> {
+    fn signal(&self, signal: Signal<()>) -> Result<(), SendError> {
         self.mailbox
             .send(signal)
-            .await
-            .map_err(|_| ActorError::ActorNotRunning(()))
+            .map_err(|_| SendError::ActorNotRunning(()))
     }
 }
 
@@ -193,18 +191,16 @@ impl ActorRef for GenericActorRef {
         other_links.remove(&self.id);
     }
 
-    async fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), ActorError> {
-        self.signal(Signal::LinkDied(id, reason)).await
+    fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError> {
+        self.signal(Signal::LinkDied(id, reason))
     }
 
-    async fn stop_gracefully(&self) -> Result<(), ActorError> {
-        self.signal(Signal::Stop).await
+    fn stop_gracefully(&self) -> Result<(), SendError> {
+        self.signal(Signal::Stop)
     }
 
-    fn stop_immediately(&self) -> Result<(), ActorError> {
-        self.stop_tx
-            .send(())
-            .map_err(|_| ActorError::ActorNotRunning(()))
+    fn kill(&self) {
+        self.abort_handle.abort()
     }
 
     async fn wait_for_stop(&self) {

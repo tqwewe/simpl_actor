@@ -1,8 +1,11 @@
-use std::any;
+use std::{any, borrow::Cow, error::Error};
 
-use tracing::debug;
+use tracing::{debug, enabled, warn, Level};
 
-use crate::{err::PanicErr, reason::ActorStopReason};
+use crate::{err::PanicErr, reason::ActorStopReason, ActorRef, GenericActorRef};
+
+/// A boxed dyn std Error used in actor hooks.
+pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 /// Defines the core functionality for actors within an actor-based concurrency model.
 ///
@@ -10,20 +13,40 @@ use crate::{err::PanicErr, reason::ActorStopReason};
 /// lifecycle management hooks, and custom error handling.
 ///
 /// This can be implemented with default behaviour using the [Actor](simpl_actor_macros::Actor) derive macro.
+///
+/// Methods in this trait that return `BoxError` will stop the actor with the reason `ActorReason::Panicked` with the error.
 #[allow(async_fn_in_trait)]
 pub trait Actor: Sized {
-    /// The error type that can be returned from the actor's methods.
-    type Error: Send + 'static;
+    /// Actor ref type.
+    type Ref: ActorRef;
 
-    /// Specifies the default size of the actor's mailbox.
+    /// Actor name, useful for logging.
+    fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(any::type_name::<Self>())
+    }
+
+    /// Retrieves a reference to the current actor.
     ///
-    /// This method can be overridden to change the size of the mailbox, affecting
-    /// how many messages can be queued before backpressure is applied.
+    /// # Panics
+    ///
+    /// This function will panic if called outside the scope of an actor.
     ///
     /// # Returns
-    /// The size of the mailbox. The default is 64.
-    fn mailbox_size() -> usize {
-        64
+    /// A reference to the actor of type `Self::Ref`.
+    fn actor_ref(&self) -> Self::Ref {
+        match Self::try_actor_ref() {
+            Some(actor_ref) => actor_ref,
+            None => panic!("actor_ref called outside the scope of an actor"),
+        }
+    }
+
+    /// Retrieves a reference to the current actor, if available.
+    ///
+    /// # Returns
+    /// An `Option` containing a reference to the actor of type `Self::Ref` if available,
+    /// or `None` if the actor reference is not available.
+    fn try_actor_ref() -> Option<Self::Ref> {
+        GenericActorRef::try_current().map(Self::Ref::from_generic)
     }
 
     /// Hook that is called before the actor starts processing messages.
@@ -33,24 +56,28 @@ pub trait Actor: Sized {
     ///
     /// # Returns
     /// A result indicating successful initialization or an error if initialization fails.
-    async fn on_start(&mut self, id: u64) -> Result<(), Self::Error> {
-        debug!("starting actor #{id} {}", any::type_name::<Self>());
+    async fn on_start(&mut self) -> Result<(), BoxError> {
+        if enabled!(Level::DEBUG) {
+            let id = self.actor_ref().id();
+            let name = self.name();
+            debug!("starting actor {name} ({id})");
+        }
+
         Ok(())
     }
 
-    /// Hook that is called when an actor panicked.
+    /// Hook that is called when an actor panicked or returns an error during an async message.
     ///
     /// This method provides an opportunity to clean up or reset state.
-    /// It can also determine whether the actor should actually be restarted
-    /// based on the nature of the error.
+    /// It can also determine whether the actor should be killed or if it should continue processing messages by returning `None`.
     ///
     /// # Parameters
     /// - `err`: The error that occurred.
     ///
     /// # Returns
-    /// Whether the actor should be restarted or not.
-    async fn on_panic(&mut self, _err: PanicErr) -> Result<ShouldRestart, Self::Error> {
-        Ok(ShouldRestart::No)
+    /// Whether the actor should continue processing, or be stopped by returning a stop reason.
+    async fn on_panic(&mut self, err: PanicErr) -> Result<Option<ActorStopReason>, BoxError> {
+        Ok(Some(ActorStopReason::Panicked(err)))
     }
 
     /// Hook that is called before the actor is stopped.
@@ -61,11 +88,36 @@ pub trait Actor: Sized {
     ///
     /// # Parameters
     /// - `reason`: The reason why the actor is being stopped.
-    ///
-    /// # Returns
-    /// A result indicating the successful cleanup or an error if the cleanup process fails.
-    async fn on_stop(self, _reason: ActorStopReason) -> Result<(), Self::Error> {
-        debug!("stopping actor {}", any::type_name::<Self>());
+    async fn on_stop(self, reason: ActorStopReason) -> Result<(), BoxError> {
+        if enabled!(Level::WARN) {
+            let id = self.actor_ref().id();
+            let name = self.name();
+            match reason {
+                ActorStopReason::Normal => {
+                    debug!("actor {name} ({id}) stopped normally");
+                }
+                ActorStopReason::Killed => {
+                    debug!("actor {name} ({id}) was killed");
+                }
+                ActorStopReason::Panicked(err) => {
+                    match err.with_str(|err| {
+                        warn!("actor {name} ({id}) panicked: {err}");
+                    }) {
+                        Ok(Some(_)) => {}
+                        _ => {
+                            warn!("actor {name} ({id}) panicked");
+                        }
+                    }
+                }
+                ActorStopReason::LinkDied {
+                    id: link_id,
+                    reason,
+                } => {
+                    warn!("actor {name} ({id}) was killed due to link ({link_id}) died with reason: {reason}");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -74,45 +126,17 @@ pub trait Actor: Sized {
     /// By default, the current actor will be stopped if the reason is anything other than normal.
     ///
     /// # Returns
-    /// Whether the actor should be stopped or not.
+    /// Whether the actor should continue processing, or be stopped by returning a stop reason.
     async fn on_link_died(
-        &self,
-        id: u64,
+        &mut self,
+        #[allow(unused)] id: u64,
         reason: ActorStopReason,
-    ) -> Result<ShouldStop, Self::Error> {
-        match reason {
-            ActorStopReason::Normal => {
-                debug!("linked actor {id} stopped normally");
-                Ok(ShouldStop::No)
-            }
-            ActorStopReason::Panicked(_) => {
-                debug!("linked actor {id} panicked");
-                Ok(ShouldStop::Yes)
-            }
-            ActorStopReason::LinkDied {
-                id: other_actor, ..
-            } => {
-                debug!("linked actor {id} died due to actor {other_actor} dying");
-                Ok(ShouldStop::Yes)
-            }
+    ) -> Result<Option<ActorStopReason>, BoxError> {
+        match &reason {
+            ActorStopReason::Normal => Ok(None),
+            ActorStopReason::Killed
+            | ActorStopReason::Panicked(_)
+            | ActorStopReason::LinkDied { .. } => Ok(Some(reason)),
         }
     }
-}
-
-/// Enum indiciating if an actor should be restarted or not after panicking.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShouldRestart {
-    /// The actor should be restarted.
-    Yes,
-    /// The actor should stop.
-    No,
-}
-
-/// Enum indiciating if an actor should be stopped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShouldStop {
-    /// The actor should be stopped.
-    Yes,
-    /// The actor should not be stopped.
-    No,
 }
