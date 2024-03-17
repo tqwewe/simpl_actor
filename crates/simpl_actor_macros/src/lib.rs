@@ -66,9 +66,7 @@ use syn::parse_macro_input;
 #[proc_macro_attribute]
 pub fn actor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let actor = parse_macro_input!(item as Actor);
-    let foo = actor.into_token_stream();
-    std::fs::write("./code.rs", foo.to_string()).unwrap();
-    TokenStream::from(foo)
+    TokenStream::from(actor.into_token_stream())
 }
 
 /// Derive macro implementing the [Actor](https://docs.rs/simpl_actor/latest/simpl_actor/trait.Actor.html) trait with default behaviour.
