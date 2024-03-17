@@ -537,6 +537,7 @@ impl Actor {
                     let infallible_block =
                         (!infallible).then_some(quote_spanned! {output_span=>
                             if let ::std::result::Result::Err(err) = res {
+                                let err: ::simpl_actor::BoxError = ::std::convert::From::from(err);
                                 match actor.on_panic(::simpl_actor::PanicErr::new(err)).await {
                                     ::std::result::Result::Ok(reason) => {
                                         return reason;

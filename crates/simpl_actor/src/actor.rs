@@ -1,6 +1,6 @@
 use std::{any, borrow::Cow, error::Error};
 
-use tracing::{debug, enabled, warn, Level};
+use tracing::{debug, enabled, error, warn, Level};
 
 use crate::{err::PanicErr, reason::ActorStopReason, ActorRef, GenericActorRef};
 
@@ -89,32 +89,41 @@ pub trait Actor: Sized {
     /// # Parameters
     /// - `reason`: The reason why the actor is being stopped.
     async fn on_stop(self, reason: ActorStopReason) -> Result<(), BoxError> {
-        if enabled!(Level::WARN) {
-            let id = self.actor_ref().id();
-            let name = self.name();
-            match reason {
-                ActorStopReason::Normal => {
-                    debug!("actor {name} ({id}) stopped normally");
-                }
-                ActorStopReason::Killed => {
-                    debug!("actor {name} ({id}) was killed");
-                }
-                ActorStopReason::Panicked(err) => {
-                    match err.with_str(|err| {
-                        warn!("actor {name} ({id}) panicked: {err}");
-                    }) {
-                        Ok(Some(_)) => {}
-                        _ => {
-                            warn!("actor {name} ({id}) panicked");
-                        }
+        let id = self.actor_ref().id();
+        let name = self.name();
+        match reason {
+            ActorStopReason::Normal => {
+                debug!("actor {name} ({id}) stopped normally");
+            }
+            ActorStopReason::Killed => {
+                debug!("actor {name} ({id}) was killed");
+            }
+            ActorStopReason::Panicked(err) => {
+                err.with(|any| {
+                    let s = any
+                        .downcast_ref::<&'static str>()
+                        .copied()
+                        .or_else(|| any.downcast_ref::<String>().map(String::as_str));
+                    if let Some(s) = s {
+                        error!("actor {name} ({id}) panicked: {s}");
+                        return;
                     }
-                }
-                ActorStopReason::LinkDied {
-                    id: link_id,
-                    reason,
-                } => {
-                    warn!("actor {name} ({id}) was killed due to link ({link_id}) died with reason: {reason}");
-                }
+
+                    let box_err = any.downcast_ref::<BoxError>();
+                    if let Some(err) = box_err {
+                        error!("actor {name} ({id}) panicked: {err}");
+                    }
+                })
+                .ok()
+                .unwrap_or_else(|| {
+                    error!("actor {name} ({id}) panicked");
+                });
+            }
+            ActorStopReason::LinkDied {
+                id: link_id,
+                reason,
+            } => {
+                warn!("actor {name} ({id}) was killed due to link ({link_id}) died with reason: {reason}");
             }
         }
 
