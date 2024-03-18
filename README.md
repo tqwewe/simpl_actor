@@ -63,13 +63,17 @@ impl MyActor {
 // Generates
 impl MyActorRef {
     /// Sends the messages, waits for processing, and returns a response.
-    async fn msg() -> Result<i32, SendError> {}
+    async fn msg() -> Result<i32, SendError>;
+    /// Sends the message after a delay.
+    fn msg_after(delay: Duration) -> JoinHandle<Result<Result<i32, Err>, SendError>>;
     /// Sends the message asynchronously, not waiting for a response.
-    fn msg_async() -> Result<(), SendError> {}
+    fn msg_async() -> Result<(), SendError>;
+    /// Sends the message asynchronously after a delay.
+    fn msg_async_after(delay: Duration) -> JoinHandle<Result<(), SendError>>;
 }
 ```
 
-**The \_async variant is only generated if the method does not have any lifetimes.**
+**The \_after and \_async variants are only generated if the method does not have any lifetimes.**
 
 In other words, all parameters must be owned or `&'static` for the async variant to be generated,
 otherwise the actor might reference deallocated memory causing UB.

@@ -358,7 +358,7 @@ impl Actor {
                  variant,
                  fields,
                  generics,
-                 ..
+                 infallible,
              })| {
                  let field_idents: Vec<_> = fields
                      .iter()
@@ -366,7 +366,7 @@ impl Actor {
                      .collect();
                 let field_tys: Punctuated<_, Token![,]> = fields.iter().map(|field| &field.ty).collect();
 
-                let mailbox = {
+                let expand_mailbox = |mailbox: TokenStream| {
                     let generic_params: Punctuated<_, Token![,]> = messages.iter().enumerate().flat_map(|(j, Message { generics, .. })| {
                         generics
                             .lifetimes()
@@ -390,16 +390,18 @@ impl Actor {
                     let all_generics = (!generic_params.is_empty()).then_some(quote! { < #generic_params > });
                     quote! {{
                         let mailbox: &::tokio::sync::mpsc::UnboundedSender<::simpl_actor::internal::Signal<#actor_msg_ident #all_generics>> =
-                            unsafe { ::std::mem::transmute(&self.mailbox) };
+                            unsafe { ::std::mem::transmute(#mailbox) };
                         mailbox
                     }}
                 };
+                let mailbox = expand_mailbox(quote! { &self.mailbox });
+                let async_after_mailbox = expand_mailbox(quote! { &__mailbox });
 
-                let mut sig = sig.clone();
-                sig.constness = None;
-                sig.asyncness = Some(Token![async](Span::call_site()));
-                sig.generics = generics.clone();
-                sig.inputs = [parse_quote! { &self }]
+                let mut send = sig.clone();
+                send.constness = None;
+                send.asyncness = Some(Token![async](Span::call_site()));
+                send.generics = generics.clone();
+                send.inputs = [parse_quote! { &self }]
                     .into_iter()
                     .chain(
                         fields
@@ -407,7 +409,7 @@ impl Actor {
                             .map(|field| FnArg::Typed(parse_quote! { #field })),
                     )
                     .collect();
-                sig.output = match sig.output {
+                send.output = match send.output {
                     ReturnType::Default => {
                         parse_quote! { -> ::std::result::Result<(), ::simpl_actor::SendError<( #field_tys )>> }
                     }
@@ -415,33 +417,78 @@ impl Actor {
                         parse_quote! { -> ::std::result::Result<#ty, ::simpl_actor::SendError<( #field_tys )>> }
                     }
                 };
+                let mut send_after = send.clone();
+                send_after.asyncness = None;
+                send_after.ident = format_ident!("{}_after", send_after.ident);
+                send_after.inputs.push(FnArg::Typed(parse_quote! { __delay: ::std::time::Duration }));
+                send_after.output = match send_after.output {
+                    ReturnType::Type(_, ty) => {
+                        parse_quote! { -> ::tokio::task::JoinHandle<#ty> }
+                    }
+                    _ => unreachable!(),
+                };
 
-                let mut timeout_sig = sig.clone();
-                timeout_sig.ident = format_ident!("{}_timeout", sig.ident);
-                timeout_sig.inputs.push(FnArg::Typed(parse_quote! { timeout: ::std::time::Duration }));
-
-                let mut try_sig = sig.clone();
-                try_sig.ident = format_ident!("try_{}", sig.ident);
-
-                let mut async_sig = sig.clone();
-                async_sig.asyncness = None;
-                async_sig.ident = format_ident!("{}_async", async_sig.ident);
-                async_sig.output =
+                let mut send_async = send.clone();
+                send_async.asyncness = None;
+                send_async.ident = format_ident!("{}_async", send_async.ident);
+                send_async.output =
                     parse_quote! { -> ::std::result::Result<(), ::simpl_actor::SendError<( #field_tys )>> };
+
+                let mut send_async_after = send_async.clone();
+                send_async_after.ident = format_ident!("{}_after", send_async.ident);
+                send_async_after.inputs.push(FnArg::Typed(parse_quote! { __delay: ::std::time::Duration }));
+                send_async_after.output = parse_quote! { -> ::tokio::task::JoinHandle<::std::result::Result<(), ::simpl_actor::SendError<( #field_tys )>>> };
 
                 let map_err = self.expand_send_error_to_actor_error(variant, fields);
 
-                let normal_debug_msg = format!(
+                let send_dead_lock_msg = format!(
                     "cannot call non-async messages on self as this would deadlock - please use the {} variant instead\nthis assertion only occurs on debug builds, release builds will deadlock",
-                    async_sig.ident
+                    send_async.ident
                 );
+                let send_after_dead_lock_msg = format!(
+                    "cannot call non-async messages on self as this would deadlock - please use the {} variant instead\nthis assertion only occurs on debug builds, release builds will deadlock",
+                    send_async_after.ident
+                );
+                let send_after_must_use = (!infallible).then(|| {
+                    let reason = format!("The caller should be responsible for handling the error.\nIf you do not intend on awaiting this call, use {} instead.", send_async_after.ident);
+                    quote! {
+                        #[must_use = #reason]
+                    }
+                });
 
                 let async_methods = (!msg.1.has_lifetime()).then(|| quote! {
+                    /// Sends the message after a delay.
+                    #send_after_must_use
+                    #[allow(non_snake_case)]
+                    #vis #send_after {
+                        ::tokio::task::spawn({
+                            let __mailbox = ::std::clone::Clone::clone(&self.mailbox);
+                            async move {
+                                ::tokio::time::sleep(__delay).await;
+
+                                ::std::debug_assert!(
+                                    #actor_ref_global_ident.try_with(|_| {}).is_err(),
+                                    #send_after_dead_lock_msg
+                                );
+
+                                let (reply, rx) = ::tokio::sync::oneshot::channel();
+                                #async_after_mailbox
+                                    .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                                        __reply: ::std::option::Option::Some(reply),
+                                        #( #field_idents ),*
+                                    }))
+                                    .map_err(|err| #map_err)?;
+
+                                rx.await.map_err(|_| ::simpl_actor::SendError::ActorStopped)
+                            }
+                        })
+                    }
+
                     /// Sends the message asynchronously, not waiting for a response.
                     ///
                     /// If the message returns an error, the actor will panic.
                     #[allow(non_snake_case)]
-                    #vis #async_sig {
+                    #vis #send_async {
                         #mailbox
                             .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
@@ -451,15 +498,37 @@ impl Actor {
 
                         ::std::result::Result::Ok(())
                     }
+
+                    /// Sends the message asynchronously after a delay.
+                    ///
+                    /// If the message returns an error, the actor will panic.
+                    #[allow(non_snake_case)]
+                    #vis #send_async_after {
+                        ::tokio::task::spawn({
+                            let __mailbox = ::std::clone::Clone::clone(&self.mailbox);
+                            async move {
+                                ::tokio::time::sleep(__delay).await;
+
+                                #async_after_mailbox
+                                    .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                                        __reply: ::std::option::Option::None,
+                                        #( #field_idents ),*
+                                    }))
+                                    .map_err(|err| #map_err)?;
+
+                                ::std::result::Result::Ok(())
+                            }
+                        })
+                    }
                 });
 
                 quote! {
                     /// Sends the messages, waits for processing, and returns a response.
                     #[allow(non_snake_case)]
-                    #vis #sig {
+                    #vis #send {
                         ::std::debug_assert!(
                             #actor_ref_global_ident.try_with(|_| {}).is_err(),
-                            #normal_debug_msg
+                            #send_dead_lock_msg
                         );
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
