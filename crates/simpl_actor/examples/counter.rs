@@ -39,6 +39,12 @@ impl CounterActor {
         self.count += amount;
     }
 
+    /// A message that takes borrowed inputs
+    #[message]
+    pub fn borrow_data<'a>(&self, s: &'a str) {
+        println!("borrowed str: {s}");
+    }
+
     /// A message returning an infallible value
     #[message(infallible)]
     pub fn count(&self) -> i64 {
@@ -77,6 +83,8 @@ async fn main() {
 
     // Increment
     assert_eq!(actor.inc(2).await, Ok(()));
+    // Take borrowed string
+    assert_eq!(actor.borrow_data(&"hi".to_string()).await, Ok(()));
     // Count should be 2
     assert_eq!(actor.count().await, Ok(2));
 

@@ -10,7 +10,7 @@ use syn::{
     punctuated::Punctuated,
     spanned::Spanned,
     Field, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem, ItemImpl, Lifetime,
-    LifetimeParam, Meta, ReturnType, Signature, Token, Type, Visibility,
+    LifetimeParam, Meta, PathArguments, ReturnType, Signature, Token, Type, Visibility,
 };
 
 pub struct Actor {
@@ -41,11 +41,12 @@ impl Message {
 }
 
 impl From<(Visibility, Signature, bool)> for Message {
-    fn from((vis, sig, infallible): (Visibility, Signature, bool)) -> Self {
+    fn from((vis, mut sig, infallible): (Visibility, Signature, bool)) -> Self {
+        let mut generics_punctuated: Punctuated<_, Token![,]> = Punctuated::new();
         let variant = format_ident!("{}", sig.ident.to_string().to_upper_camel_case());
         let fields: Punctuated<Field, Token![,]> = sig
             .inputs
-            .iter()
+            .iter_mut()
             .filter_map(|input| match input {
                 FnArg::Receiver(_) => None,
                 FnArg::Typed(pat_type) => Some(pat_type),
@@ -56,6 +57,88 @@ impl From<(Visibility, Signature, bool)> for Message {
                     syn::Pat::Ident(pat_ident) => pat_ident.ident.clone(),
                     _ => format_ident!("__field{i}"),
                 };
+                fn inject_lifetimes(
+                    name: &mut String,
+                    ty: &mut Type,
+                    lifetimes: &mut Punctuated<Lifetime, Token![,]>,
+                ) {
+                    match ty {
+                        Type::Reference(ty_ref) => {
+                            let lt = Lifetime::new(name, Span::call_site());
+                            lifetimes.push(lt.clone());
+                            ty_ref.lifetime = Some(lt);
+                        }
+                        Type::Array(ty_array) => {
+                            name.push_str("_array");
+                            inject_lifetimes(name, &mut ty_array.elem, lifetimes)
+                        }
+                        Type::Group(ty) => {
+                            name.push_str("_group");
+                            inject_lifetimes(name, &mut ty.elem, lifetimes)
+                        }
+                        Type::Paren(ty) => {
+                            name.push_str("_paren");
+                            inject_lifetimes(name, &mut ty.elem, lifetimes)
+                        }
+                        Type::Path(ty) => {
+                            let original_len = name.len();
+                            ty.path.segments.iter_mut().for_each(|segment| {
+                                if let PathArguments::AngleBracketed(args) = &mut segment.arguments
+                                {
+                                    name.truncate(original_len);
+                                    let segment_name = format!("_{}_0", segment.ident);
+                                    name.push_str(&segment_name);
+
+                                    args.args
+                                        .iter_mut()
+                                        .filter(|arg| {
+                                            matches!(
+                                                arg,
+                                                GenericArgument::Lifetime(_)
+                                                    | GenericArgument::Type(_)
+                                            )
+                                        })
+                                        .enumerate()
+                                        .for_each(|(i, arg)| {
+                                            if let Some(pos) = name.rfind('_') {
+                                                name.truncate(pos);
+                                            }
+                                            name.push_str(&format!("_{i}"));
+
+                                            match arg {
+                                                GenericArgument::Lifetime(lifetime) => {
+                                                    *lifetime =
+                                                        Lifetime::new(name, Span::call_site());
+                                                    lifetimes.push(lifetime.clone());
+                                                }
+                                                GenericArgument::Type(ty) => {
+                                                    inject_lifetimes(name, ty, lifetimes);
+                                                }
+                                                _ => {}
+                                            }
+                                        });
+                                }
+                            })
+                        }
+                        Type::Slice(ty) => {
+                            name.push_str("_slice");
+                            inject_lifetimes(name, &mut ty.elem, lifetimes)
+                        }
+                        Type::Tuple(ty) => {
+                            name.push_str("_tuple_0");
+                            ty.elems.iter_mut().enumerate().for_each(|(i, ty)| {
+                                if let Some(pos) = name.rfind('_') {
+                                    name.truncate(pos);
+                                }
+                                name.push_str(&format!("_{i}"));
+                                inject_lifetimes(name, ty, lifetimes)
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let mut name = format!("'{}__{}", sig.ident, ident);
+                inject_lifetimes(&mut name, &mut pat_type.ty, &mut generics_punctuated);
                 let ty = match pat_type.ty.as_ref() {
                     Type::Reference(ty_ref) => {
                         let mut ty_ref = ty_ref.clone();
@@ -73,15 +156,9 @@ impl From<(Visibility, Signature, bool)> for Message {
                 }
             })
             .collect();
-        let generics_punctuated: Punctuated<_, Token![,]> = fields
-            .iter()
-            .filter_map(|field| match &field.ty {
-                Type::Reference(ty_ref) => ty_ref
-                    .lifetime
-                    .clone()
-                    .map(|lifetime| GenericParam::Lifetime(LifetimeParam::new(lifetime))),
-                _ => None,
-            })
+        let generics_punctuated: Punctuated<_, Token![,]> = generics_punctuated
+            .into_iter()
+            .map(|lifetime| GenericParam::Lifetime(LifetimeParam::new(lifetime)))
             .chain(
                 sig.generics
                     .params
@@ -700,25 +777,7 @@ impl Parse for Actor {
         let messages = Actor::extract_messages(&mut item_impl)?;
         let actor_generic_params: Punctuated<_, Token![,]> = messages
             .iter()
-            .flat_map(|Message { sig, fields, .. }| {
-                fields
-                    .iter()
-                    .filter_map(|field| match &field.ty {
-                        Type::Reference(ty_ref) => ty_ref
-                            .lifetime
-                            .clone()
-                            .map(|lifetime| GenericParam::Lifetime(LifetimeParam::new(lifetime))),
-                        _ => None,
-                    })
-                    .chain(sig.generics.params.iter().filter_map(|param| match param {
-                        GenericParam::Type(ty_param) => {
-                            let mut ty_param = ty_param.clone();
-                            ty_param.bounds = Punctuated::new();
-                            Some(GenericParam::Type(ty_param))
-                        }
-                        _ => None,
-                    }))
-            })
+            .flat_map(|Message { generics, .. }| generics.params.clone())
             .collect();
         let has_generic_params = !actor_generic_params.is_empty();
         let actor_generics = Generics {
