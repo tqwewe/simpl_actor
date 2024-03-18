@@ -13,6 +13,16 @@ pub enum SendError<E = ()> {
     ActorStopped,
 }
 
+impl<E> SendError<E> {
+    /// Clears in inner data back to `()`.
+    pub fn reset(self) -> SendError<()> {
+        match self {
+            SendError::ActorNotRunning(_) => SendError::ActorNotRunning(()),
+            SendError::ActorStopped => SendError::ActorStopped,
+        }
+    }
+}
+
 impl<E> fmt::Debug for SendError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
