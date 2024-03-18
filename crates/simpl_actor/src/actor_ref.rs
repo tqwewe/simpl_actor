@@ -1,7 +1,11 @@
-use std::{collections::HashMap, mem, sync::Arc};
+use std::{
+    collections::HashMap,
+    mem,
+    sync::{Arc, Mutex},
+};
 
 use futures::stream::AbortHandle;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::{err::SendError, internal::Signal, reason::ActorStopReason};
 
@@ -23,20 +27,20 @@ pub trait ActorRef: Clone {
 
     /// Links this actor with a child, notifying the child actor if the parent dies through
     /// [Actor::on_link_died](crate::actor::Actor::on_link_died), but not visa versa.
-    async fn link_child<R: ActorRef>(&self, child: &R);
+    fn link_child<R: ActorRef>(&self, child: &R);
 
     /// Unlinks the actor with a previously linked actor.
-    async fn unlink_child<R: ActorRef>(&self, child: &R);
+    fn unlink_child<R: ActorRef>(&self, child: &R);
 
     /// Links two actors with one another, notifying eachother if either actor dies through [Actor::on_link_died](crate::actor::Actor::on_link_died).
     ///
     /// This operation is atomic.
-    async fn link_together<R: ActorRef>(&self, actor_ref: &R);
+    fn link_together<R: ActorRef>(&self, actor_ref: &R);
 
     /// Unlinks two previously linked actors.
     ///
     /// This operation is atomic.
-    async fn unlink_together<R: ActorRef>(&self, actor_ref: &R);
+    fn unlink_together<R: ActorRef>(&self, actor_ref: &R);
 
     /// Notifies the actor that one of its links died.
     ///
@@ -149,24 +153,24 @@ impl ActorRef for GenericActorRef {
         !self.mailbox.is_closed()
     }
 
-    async fn link_child<R: ActorRef>(&self, child: &R) {
+    fn link_child<R: ActorRef>(&self, child: &R) {
         if self.id == child.id() {
             return;
         }
 
         let child: GenericActorRef = child.clone().into_generic();
-        self.links.lock().await.insert(child.id, child);
+        self.links.lock().unwrap().insert(child.id, child);
     }
 
-    async fn unlink_child<R: ActorRef>(&self, child: &R) {
+    fn unlink_child<R: ActorRef>(&self, child: &R) {
         if self.id == child.id() {
             return;
         }
 
-        self.links.lock().await.remove(&child.id());
+        self.links.lock().unwrap().remove(&child.id());
     }
 
-    async fn link_together<R: ActorRef>(&self, actor_ref: &R) {
+    fn link_together<R: ActorRef>(&self, actor_ref: &R) {
         if self.id == actor_ref.id() {
             return;
         }
@@ -174,19 +178,19 @@ impl ActorRef for GenericActorRef {
         let actor_ref: GenericActorRef = actor_ref.clone().into_generic();
         let acotr_ref_links = actor_ref.links.clone();
         let (mut this_links, mut other_links) =
-            tokio::join!(self.links.lock(), acotr_ref_links.lock());
+            (self.links.lock().unwrap(), acotr_ref_links.lock().unwrap());
         this_links.insert(actor_ref.id, actor_ref);
         other_links.insert(self.id, self.clone());
     }
 
-    async fn unlink_together<R: ActorRef>(&self, actor_ref: &R) {
+    fn unlink_together<R: ActorRef>(&self, actor_ref: &R) {
         if self.id == actor_ref.id() {
             return;
         }
 
         let actor_ref: GenericActorRef = actor_ref.clone().into_generic();
         let (mut this_links, mut other_links) =
-            tokio::join!(self.links.lock(), actor_ref.links.lock());
+            (self.links.lock().unwrap(), actor_ref.links.lock().unwrap());
         this_links.remove(&actor_ref.id);
         other_links.remove(&self.id);
     }

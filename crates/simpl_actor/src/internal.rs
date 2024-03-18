@@ -4,7 +4,7 @@ use std::{
     panic::AssertUnwindSafe,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -13,7 +13,7 @@ use futures::{
     stream::{AbortRegistration, Abortable},
     FutureExt,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::{
     actor::Actor,
@@ -64,8 +64,10 @@ pub async fn run_actor_lifecycle<A, M, F>(
     .await
     .unwrap_or(ActorStopReason::Killed);
 
-    for (_, actor_ref) in links.lock().await.drain() {
-        let _ = actor_ref.notify_link_died(id, reason.clone());
+    if let Ok(mut links) = links.lock() {
+        for (_, actor_ref) in links.drain() {
+            let _ = actor_ref.notify_link_died(id, reason.clone());
+        }
     }
 
     actor.on_stop(reason.clone()).await.unwrap();

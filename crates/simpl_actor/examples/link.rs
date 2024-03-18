@@ -55,7 +55,7 @@ async fn main() -> Result<(), SendError> {
     let parent = MyActor.spawn();
     let child_a = MyActor.spawn();
     let child_b = MyActor.spawn();
-    parent.link_child(&child_b).await;
+    parent.link_child(&child_b);
 
     let _ = child_a.force_panic().await;
     assert!(parent.is_alive());

@@ -260,7 +260,7 @@ impl Actor {
                 id: u64,
                 mailbox: ::tokio::sync::mpsc::UnboundedSender<::simpl_actor::internal::Signal<#actor_msg_ident #actor_msg_generics>>,
                 abort_handle: ::futures::stream::AbortHandle,
-                links: ::std::sync::Arc<::tokio::sync::Mutex<::std::collections::HashMap<u64, ::simpl_actor::GenericActorRef>>>,
+                links: ::std::sync::Arc<::std::sync::Mutex<::std::collections::HashMap<u64, ::simpl_actor::GenericActorRef>>>,
             }
         }
     }
@@ -425,24 +425,24 @@ impl Actor {
                     !self.mailbox.is_closed()
                 }
 
-                async fn link_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
+                fn link_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
                     let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
-                    ::simpl_actor::ActorRef::link_child(&this_actor_ref, child).await
+                    ::simpl_actor::ActorRef::link_child(&this_actor_ref, child)
                 }
 
-                async fn unlink_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
+                fn unlink_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
                     let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
-                    ::simpl_actor::ActorRef::unlink_child(&this_actor_ref, child).await
+                    ::simpl_actor::ActorRef::unlink_child(&this_actor_ref, child)
                 }
 
-                async fn link_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
+                fn link_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
                     let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
-                    ::simpl_actor::ActorRef::link_together(&this_actor_ref, actor_ref).await
+                    ::simpl_actor::ActorRef::link_together(&this_actor_ref, actor_ref)
                 }
 
-                async fn unlink_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
+                fn unlink_together<R: ::simpl_actor::ActorRef>(&self, actor_ref: &R) {
                     let this_actor_ref = ::simpl_actor::ActorRef::into_generic(::std::clone::Clone::clone(self));
-                    ::simpl_actor::ActorRef::unlink_together(&this_actor_ref, actor_ref).await
+                    ::simpl_actor::ActorRef::unlink_together(&this_actor_ref, actor_ref)
                 }
 
                 fn notify_link_died(
@@ -594,7 +594,7 @@ impl Actor {
                     let (tx, rx) =
                         ::tokio::sync::mpsc::unbounded_channel();
                     let (abort_handle, abort_registration) = ::futures::stream::AbortHandle::new_pair();
-                    let links = ::std::sync::Arc::new(::tokio::sync::Mutex::new(::std::collections::HashMap::new()));
+                    let links = ::std::sync::Arc::new(::std::sync::Mutex::new(::std::collections::HashMap::new()));
                     let actor_ref = #actor_ref_ident {
                         id,
                         mailbox: tx,
@@ -620,12 +620,12 @@ impl Actor {
                     actor_ref
                 }
 
-                async fn spawn_link(self) -> Self::Ref {
+                fn spawn_link(self) -> Self::Ref {
                     let link = ::simpl_actor::GenericActorRef::try_current();
                     let actor_ref = ::simpl_actor::Spawn::spawn(self);
                     match link {
                         ::std::option::Option::Some(parent_actor_ref) => {
-                            ::simpl_actor::ActorRef::link_together(&actor_ref, &parent_actor_ref).await;
+                            ::simpl_actor::ActorRef::link_together(&actor_ref, &parent_actor_ref);
                         }
                         ::std::option::Option::None => {
                             ::std::panic!("spawn_link cannot be called outside any actors")
@@ -634,12 +634,12 @@ impl Actor {
                     actor_ref
                 }
 
-                async fn spawn_child(self) -> Self::Ref {
+                fn spawn_child(self) -> Self::Ref {
                     let link = ::simpl_actor::GenericActorRef::try_current();
                     let actor_ref = ::simpl_actor::Spawn::spawn(self);
                     match link {
                         ::std::option::Option::Some(parent_actor_ref) => {
-                            ::simpl_actor::ActorRef::link_child(&actor_ref, &parent_actor_ref).await;
+                            ::simpl_actor::ActorRef::link_child(&actor_ref, &parent_actor_ref);
                         }
                         ::std::option::Option::None => {
                             ::std::panic!("spawn_child cannot be called outside any actors")

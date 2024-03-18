@@ -24,11 +24,11 @@ pub trait Spawn {
     /// Spawns an actor with a bidirectional link between the current actor and the one being spawned.
     ///
     /// If either actor dies, [Actor::on_link_died](crate::actor::Actor::on_link_died) will be called on the other actor.
-    async fn spawn_link(self) -> Self::Ref;
+    fn spawn_link(self) -> Self::Ref;
 
     /// Spawns an actor with a unidirectional link between the current actor and the child.
     ///
     /// If the current actor dies, [Actor::on_link_died](crate::actor::Actor::on_link_died) will be called on the spawned one,
     /// however if the spawned actor dies, Actor::on_link_died will not be called.
-    async fn spawn_child(self) -> Self::Ref;
+    fn spawn_child(self) -> Self::Ref;
 }
