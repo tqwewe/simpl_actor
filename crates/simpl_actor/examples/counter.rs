@@ -77,28 +77,30 @@ impl CounterActor {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn main() -> Result<(), BoxError> {
     let counter = CounterActor::new();
     let actor = counter.spawn();
 
     // Increment
-    assert_eq!(actor.inc(2).await, Ok(()));
+    actor.inc(2).await?;
     // Take borrowed string
-    assert_eq!(actor.borrow_data(&"hi".to_string()).await, Ok(()));
+    actor.borrow_data(&"hi".to_string()).await.map_err(SendError::reset)?;
     // Count should be 2
-    assert_eq!(actor.count().await, Ok(2));
+    assert_eq!(actor.count().await?, 2);
 
     // Trigger the actor to sleep for 100ms in the background
-    assert_eq!(actor.sleep_async(), Ok(()));
+    actor.sleep_async()?;
+
+    actor.error().await??;
 
     // If a panic occurs when running a message, we should receive an error that the actor was stopped
     assert_eq!(actor.force_panic().await, Err(SendError::ActorStopped));
     // An actor will also panic by default if an error is returned during an async message
-    assert_eq!(actor.error_async(), Ok(()));
+    actor.error_async()?;
     // But we've implemented the `Actor::pre_restart` method to return `true`, so the actor will be restarted,
     // and new messages should be handled sucessfully, even with the state being preserved
-    assert_eq!(actor.inc(1).await, Ok(()));
-    assert_eq!(actor.count().await, Ok(3));
+    actor.inc(1).await?;
+    assert_eq!(actor.count().await?, 3);
 
     // Stop the actor, dropping any pending messages
     actor.kill();
@@ -106,4 +108,6 @@ async fn main() {
     actor.wait_for_stop().await;
     // Any new messages should error since the actor is no longer running
     assert_eq!(actor.inc(1).await, Err(SendError::ActorNotRunning(1)));
+
+    Ok(())
 }
