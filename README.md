@@ -82,10 +82,6 @@ otherwise the actor might reference deallocated memory causing UB.
 
 Contributions are welcome! Feel free to submit pull requests, create issues, or suggest improvements.
 
-Sure, here's the revised license section for your README.md:
-
----
-
 ## License
 
 `simpl_actor` is dual-licensed under either:
