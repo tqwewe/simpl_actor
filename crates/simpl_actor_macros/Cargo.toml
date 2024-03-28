@@ -1,7 +1,7 @@
 [package]
 name = "simpl_actor_macros"
 description = "Simple tokio actors macros"
-version = "0.2.6"
+version = "0.2.7"
 readme = "../../README.md"
 repository = "https://github.com/tqwewe/simpl_actor"
 license = "MIT OR Apache-2.0"
