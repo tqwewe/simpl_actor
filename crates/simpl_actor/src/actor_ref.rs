@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
-    mem,
+    fmt,
     sync::{Arc, Mutex},
 };
 
-use futures::stream::AbortHandle;
+use dyn_clone::DynClone;
+use futures::{future::BoxFuture, stream::AbortHandle};
 use tokio::sync::mpsc;
 
 use crate::{err::SendError, internal::Signal, reason::ActorStopReason};
@@ -24,6 +25,9 @@ pub trait ActorRef: Clone {
 
     /// Returns whether the actor is currently alive.
     fn is_alive(&self) -> bool;
+
+    /// Returns the current actor ref, if called from the running actor.
+    fn current() -> Option<Self>;
 
     /// Links this actor with a child, notifying the child actor if the parent dies through
     /// [Actor::on_link_died](crate::actor::Actor::on_link_died), but not visa versa.
@@ -85,62 +89,77 @@ pub trait ActorRef: Clone {
 
     #[doc(hidden)]
     fn into_generic(self) -> GenericActorRef;
-    #[doc(hidden)]
-    fn from_generic(actor_ref: GenericActorRef) -> Self;
 }
+
+trait Mailbox: DynClone + fmt::Debug + Send {
+    fn closed(&self) -> BoxFuture<'_, ()>;
+    fn is_closed(&self) -> bool;
+    fn signal_stop(&self) -> Result<(), SendError>;
+    fn signal_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError>;
+}
+
+impl<T: Send> Mailbox for mpsc::UnboundedSender<Signal<T>> {
+    fn closed(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.closed())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+
+    fn signal_stop(&self) -> Result<(), SendError> {
+        self.send(Signal::Stop)
+            .map_err(|err| SendError::from(err).reset())
+    }
+
+    fn signal_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError> {
+        self.send(Signal::LinkDied(id, reason))
+            .map_err(|err| SendError::from(err).reset())
+    }
+}
+
+dyn_clone::clone_trait_object!(Mailbox);
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct GenericActorRef {
     id: u64,
-    mailbox: mpsc::UnboundedSender<Signal<()>>,
+    mailbox: Box<dyn Mailbox>,
     abort_handle: AbortHandle,
     links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
 }
 
 impl GenericActorRef {
-    pub fn current() -> Self {
-        CURRENT_ACTOR.with(|actor_ref| actor_ref.clone())
-    }
-
-    pub fn try_current() -> Option<Self> {
-        CURRENT_ACTOR.try_with(|actor_ref| actor_ref.clone()).ok()
-    }
-
-    pub unsafe fn from_parts<M>(
+    pub fn from_parts<T: Send + 'static>(
         id: u64,
-        channel: mpsc::UnboundedSender<Signal<M>>,
+        mailbox: mpsc::UnboundedSender<Signal<T>>,
         abort_handle: AbortHandle,
         links: Arc<Mutex<HashMap<u64, GenericActorRef>>>,
     ) -> Self {
         GenericActorRef {
             id,
-            mailbox: mem::transmute(channel),
+            mailbox: Box::new(mailbox),
             abort_handle,
             links,
         }
     }
+}
 
-    pub unsafe fn into_parts<M>(
-        self,
-    ) -> (
-        u64,
-        mpsc::UnboundedSender<Signal<M>>,
-        AbortHandle,
-        Arc<Mutex<HashMap<u64, GenericActorRef>>>,
-    ) {
-        (
-            self.id,
-            mem::transmute(self.mailbox),
-            self.abort_handle,
-            self.links,
-        )
+impl Mailbox for GenericActorRef {
+    fn closed(&self) -> BoxFuture<'_, ()> {
+        self.mailbox.closed()
     }
 
-    fn signal(&self, signal: Signal<()>) -> Result<(), SendError> {
-        self.mailbox
-            .send(signal)
-            .map_err(|_| SendError::ActorNotRunning(()))
+    fn is_closed(&self) -> bool {
+        self.mailbox.is_closed()
+    }
+
+    fn signal_stop(&self) -> Result<(), SendError> {
+        self.mailbox.signal_stop()
+    }
+
+    fn signal_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError> {
+        self.mailbox.signal_link_died(id, reason)
     }
 }
 
@@ -150,7 +169,11 @@ impl ActorRef for GenericActorRef {
     }
 
     fn is_alive(&self) -> bool {
-        !self.mailbox.is_closed()
+        !self.is_closed()
+    }
+
+    fn current() -> Option<Self> {
+        CURRENT_ACTOR.try_with(|actor_ref| actor_ref.clone()).ok()
     }
 
     fn link_child<R: ActorRef>(&self, child: &R) {
@@ -196,11 +219,11 @@ impl ActorRef for GenericActorRef {
     }
 
     fn notify_link_died(&self, id: u64, reason: ActorStopReason) -> Result<(), SendError> {
-        self.signal(Signal::LinkDied(id, reason))
+        self.mailbox.signal_link_died(id, reason)
     }
 
     fn stop_gracefully(&self) -> Result<(), SendError> {
-        self.signal(Signal::Stop)
+        self.mailbox.signal_stop()
     }
 
     fn kill(&self) {
@@ -213,9 +236,5 @@ impl ActorRef for GenericActorRef {
 
     fn into_generic(self) -> GenericActorRef {
         self
-    }
-
-    fn from_generic(actor_ref: GenericActorRef) -> Self {
-        actor_ref
     }
 }

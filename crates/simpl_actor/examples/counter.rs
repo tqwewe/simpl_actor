@@ -84,7 +84,10 @@ async fn main() -> Result<(), BoxError> {
     // Increment
     actor.inc(2).await?;
     // Take borrowed string
-    actor.borrow_data(&"hi".to_string()).await.map_err(SendError::reset)?;
+    actor
+        .borrow_data(&"hi".to_string())
+        .await
+        .map_err(SendError::reset)?;
     // Count should be 2
     assert_eq!(actor.count().await?, 2);
 

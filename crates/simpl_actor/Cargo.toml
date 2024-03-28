@@ -12,6 +12,16 @@ keywords = ["actor", "macro", "tokio"]
 [dependencies]
 simpl_actor_macros = { path = "../simpl_actor_macros", version = "0.2.6" }
 
+dyn-clone = "1.0"
 futures = "0.3"
+num_cpus = "1.0"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.4", features = ["async_tokio"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+
+[[bench]]
+name = "concurrent_reads"
+harness = false

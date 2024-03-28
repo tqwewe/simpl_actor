@@ -4,6 +4,8 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
+use tokio::sync::mpsc;
+
 /// Error that can occur when sending a message to an actor.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SendError<E = ()> {
@@ -40,6 +42,12 @@ impl<E> fmt::Display for SendError<E> {
             SendError::ActorNotRunning(_) => write!(f, "actor not running"),
             SendError::ActorStopped => write!(f, "actor stopped"),
         }
+    }
+}
+
+impl<T> From<mpsc::error::SendError<T>> for SendError<T> {
+    fn from(err: mpsc::error::SendError<T>) -> Self {
+        SendError::ActorNotRunning(err.0)
     }
 }
 

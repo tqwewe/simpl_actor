@@ -32,6 +32,7 @@ struct Message {
     fields: Punctuated<Field, Token![,]>,
     generics: Generics,
     infallible: bool,
+    read_only: bool,
 }
 
 impl Message {
@@ -172,6 +173,14 @@ impl From<(Visibility, Signature, bool)> for Message {
         } else {
             parse_quote! { < #generics_punctuated > }
         };
+        let read_only = sig
+            .inputs
+            .first()
+            .map(|this| match this {
+                FnArg::Receiver(receiver) => receiver.mutability.is_none(),
+                FnArg::Typed(_) => false,
+            })
+            .unwrap_or(false);
 
         Message {
             vis,
@@ -180,6 +189,7 @@ impl From<(Visibility, Signature, bool)> for Message {
             fields,
             generics,
             infallible,
+            read_only,
         }
     }
 }
@@ -296,6 +306,36 @@ impl Actor {
         }
     }
 
+    fn expand_msg_impl_message(&self) -> proc_macro2::TokenStream {
+        let Self {
+            actor_generics,
+            actor_msg_ident,
+            messages,
+            ..
+        } = self;
+        let (impl_generics, ty_generics, where_clause) = actor_generics.split_for_impl();
+
+        let arms = messages.iter().map(
+            |Message {
+                 variant, read_only, ..
+             }| {
+                quote! {
+                    #actor_msg_ident::#variant { .. } => #read_only
+                }
+            },
+        );
+
+        quote! {
+            impl #impl_generics ::simpl_actor::internal::Message for #actor_msg_ident #ty_generics #where_clause {
+                fn is_read_only(&self) -> bool {
+                    match self {
+                        #( #arms ),*
+                    }
+                }
+            }
+        }
+    }
+
     fn expand_send_error_to_actor_error(
         &self,
         variant: &Ident,
@@ -312,12 +352,17 @@ impl Actor {
 
         quote! {
             match err.0 {
-                ::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
-                    __reply: _,
-                    #field_idents
-                }) => ::simpl_actor::SendError::ActorNotRunning((
-                    #field_idents
-                )),
+                ::simpl_actor::internal::Signal::Message(msg) => {
+                    match *msg {
+                        #actor_msg_ident::#variant {
+                            __reply: _,
+                            #field_idents
+                        } => ::simpl_actor::SendError::ActorNotRunning((
+                            #field_idents
+                        )),
+                        _ => ::std::unimplemented!(),
+                    }
+                },
                 _ => ::std::unimplemented!(),
             }
         }
@@ -359,6 +404,7 @@ impl Actor {
                  fields,
                  generics,
                  infallible,
+                 ..
              })| {
                  let field_idents: Vec<_> = fields
                      .iter()
@@ -473,10 +519,10 @@ impl Actor {
 
                                 let (reply, rx) = ::tokio::sync::oneshot::channel();
                                 #async_after_mailbox
-                                    .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                                    .send(::simpl_actor::internal::Signal::Message(::std::boxed::Box::new(#actor_msg_ident::#variant {
                                         __reply: ::std::option::Option::Some(reply),
                                         #( #field_idents ),*
-                                    }))
+                                    })))
                                     .map_err(|err| #map_err)?;
 
                                 rx.await.map_err(|_| ::simpl_actor::SendError::ActorStopped)
@@ -490,10 +536,10 @@ impl Actor {
                     #[allow(non_snake_case)]
                     #vis #send_async {
                         #mailbox
-                            .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                            .send(::simpl_actor::internal::Signal::Message(::std::boxed::Box::new(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::None,
                                 #( #field_idents ),*
-                            }))
+                            })))
                             .map_err(|err| #map_err)?;
 
                         ::std::result::Result::Ok(())
@@ -510,10 +556,10 @@ impl Actor {
                                 ::tokio::time::sleep(__delay).await;
 
                                 #async_after_mailbox
-                                    .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                                    .send(::simpl_actor::internal::Signal::Message(::std::boxed::Box::new(#actor_msg_ident::#variant {
                                         __reply: ::std::option::Option::None,
                                         #( #field_idents ),*
-                                    }))
+                                    })))
                                     .map_err(|err| #map_err)?;
 
                                 ::std::result::Result::Ok(())
@@ -533,10 +579,10 @@ impl Actor {
 
                         let (reply, rx) = ::tokio::sync::oneshot::channel();
                         #mailbox
-                            .send(::simpl_actor::internal::Signal::Message(#actor_msg_ident::#variant {
+                            .send(::simpl_actor::internal::Signal::Message(::std::boxed::Box::new(#actor_msg_ident::#variant {
                                 __reply: ::std::option::Option::Some(reply),
                                 #( #field_idents ),*
-                            }))
+                            })))
                             .map_err(|err| #map_err)?;
 
                         rx.await.map_err(|_| ::simpl_actor::SendError::ActorStopped)
@@ -557,7 +603,9 @@ impl Actor {
 
     fn expand_actor_ref_impl_actor_ref(&self) -> proc_macro2::TokenStream {
         let Self {
-            actor_ref_ident, ..
+            actor_ref_ident,
+            actor_ref_global_ident,
+            ..
         } = self;
 
         quote! {
@@ -569,6 +617,10 @@ impl Actor {
 
                 fn is_alive(&self) -> bool {
                     !self.mailbox.is_closed()
+                }
+
+                fn current() -> ::std::option::Option<Self> {
+                    #actor_ref_global_ident.try_with(|actor_ref| actor_ref.clone()).ok()
                 }
 
                 fn link_child<R: ::simpl_actor::ActorRef>(&self, child: &R) {
@@ -617,24 +669,12 @@ impl Actor {
                 }
 
                 fn into_generic(self) -> ::simpl_actor::GenericActorRef {
-                    unsafe {
-                        ::simpl_actor::GenericActorRef::from_parts(
-                            self.id,
-                            self.mailbox,
-                            self.abort_handle,
-                            self.links,
-                        )
-                    }
-                }
-
-                fn from_generic(actor_ref: ::simpl_actor::GenericActorRef) -> Self {
-                    let (id, mailbox, abort_handle, links) = unsafe { actor_ref.into_parts() };
-                    #actor_ref_ident {
-                        id,
-                        mailbox,
-                        abort_handle,
-                        links,
-                    }
+                    ::simpl_actor::GenericActorRef::from_parts(
+                        self.id,
+                        self.mailbox,
+                        self.abort_handle,
+                        self.links,
+                    )
                 }
             }
         }
@@ -659,6 +699,7 @@ impl Actor {
                      variant,
                      fields,
                      infallible,
+                     read_only,
                      ..
                  }| {
                     let fn_ident = &sig.ident;
@@ -684,7 +725,7 @@ impl Actor {
                         (!infallible).then_some(quote_spanned! {output_span=>
                             if let ::std::result::Result::Err(err) = res {
                                 let err: ::simpl_actor::BoxError = ::std::convert::From::from(err);
-                                match actor.on_panic(::simpl_actor::PanicErr::new(err)).await {
+                                match actor.try_write().expect("actor currently being written to - this is a bug and should be reported").on_panic(::simpl_actor::PanicErr::new(err)).await {
                                     ::std::result::Result::Ok(reason) => {
                                         return reason;
                                     }
@@ -695,12 +736,26 @@ impl Actor {
                             }
                         });
 
+                    let actor = if *read_only {
+                        quote! {
+                            actor
+                                .try_read()
+                                .expect("actor currently being written to - this is a bug and should be reported")
+                        }
+                    } else {
+                        quote! {
+                            actor
+                                .try_write()
+                                .expect("actor currently being read or written to - this is a bug and should be reported")
+                        }
+                    };
+
                     quote_spanned! {output_span=>
                         #actor_msg_ident::#variant {
                             __reply,
                             #( #field_idents ),*
                         } => {
-                            let res #infallible_ty_assertion = actor.#fn_ident( #( #field_idents ),* ) #dot_await;
+                            let res #infallible_ty_assertion = #actor.#fn_ident( #( #field_idents ),* ) #dot_await;
                             if let ::std::option::Option::Some(reply) = __reply {
                                 let _ = reply.send(res);
                                 return None;
@@ -726,7 +781,7 @@ impl Actor {
 
                 fn spawn(self) -> Self::Ref {
                     fn handle_message<'a>(
-                        actor: &'a mut #ident,
+                        actor: &'a ::tokio::sync::RwLock<#ident>,
                         msg: #actor_msg_ident #actor_msg_generics,
                     ) -> ::core::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = ::std::option::Option<::simpl_actor::ActorStopReason>> + ::core::marker::Send + 'a>> {
                         ::std::boxed::Box::pin(async move {
@@ -767,7 +822,7 @@ impl Actor {
                 }
 
                 fn spawn_link(self) -> Self::Ref {
-                    let link = ::simpl_actor::GenericActorRef::try_current();
+                    let link = <::simpl_actor::GenericActorRef as ::simpl_actor::ActorRef>::current();
                     let actor_ref = ::simpl_actor::Spawn::spawn(self);
                     match link {
                         ::std::option::Option::Some(parent_actor_ref) => {
@@ -781,7 +836,7 @@ impl Actor {
                 }
 
                 fn spawn_child(self) -> Self::Ref {
-                    let link = ::simpl_actor::GenericActorRef::try_current();
+                    let link = <::simpl_actor::GenericActorRef as ::simpl_actor::ActorRef>::current();
                     let actor_ref = ::simpl_actor::Spawn::spawn(self);
                     match link {
                         ::std::option::Option::Some(parent_actor_ref) => {
@@ -802,6 +857,7 @@ impl ToTokens for Actor {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
         let item_impl = &self.item_impl;
         let msg_enum = self.expand_msg_enum();
+        let msg_impl_message = self.expand_msg_impl_message();
         let actor_ref_struct = self.expand_actor_ref_struct();
         let actor_ref_impl = self.expand_actor_ref_impl();
         let actor_ref_impl_actor_ref = self.expand_actor_ref_impl_actor_ref();
@@ -811,6 +867,7 @@ impl ToTokens for Actor {
             #item_impl
 
             #msg_enum
+            #msg_impl_message
             #actor_ref_struct
             #actor_ref_impl
             #actor_ref_impl_actor_ref

@@ -2,7 +2,7 @@ use std::{any, borrow::Cow, error::Error};
 
 use tracing::{debug, enabled, error, warn, Level};
 
-use crate::{err::PanicErr, reason::ActorStopReason, ActorRef, GenericActorRef};
+use crate::{err::PanicErr, reason::ActorStopReason, ActorRef};
 
 /// A boxed dyn std Error used in actor hooks.
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
@@ -46,7 +46,14 @@ pub trait Actor: Sized {
     /// An `Option` containing a reference to the actor of type `Self::Ref` if available,
     /// or `None` if the actor reference is not available.
     fn try_actor_ref() -> Option<Self::Ref> {
-        GenericActorRef::try_current().map(Self::Ref::from_generic)
+        Self::Ref::current()
+    }
+
+    /// The maximum number of concurrent messages to handle at a time.
+    ///
+    /// This defaults to the number of cpus on the system.
+    fn max_concurrent_reads() -> usize {
+        num_cpus::get()
     }
 
     /// Hook that is called before the actor starts processing messages.
