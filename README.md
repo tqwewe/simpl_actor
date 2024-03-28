@@ -57,19 +57,19 @@ When you define a message in `simpl_actor`, two variants of the message handling
 #[actor]
 impl MyActor {
     #[message]
-    fn msg() -> Result<i32, Err> {}
+    fn msg(&self) -> Result<i32, Err> {}
 }
 
 // Generates
 impl MyActorRef {
     /// Sends the messages, waits for processing, and returns a response.
-    async fn msg() -> Result<i32, SendError>;
+    async fn msg(&self) -> Result<i32, SendError>;
     /// Sends the message after a delay.
-    fn msg_after(delay: Duration) -> JoinHandle<Result<Result<i32, Err>, SendError>>;
+    fn msg_after(&self, delay: Duration) -> JoinHandle<Result<Result<i32, Err>, SendError>>;
     /// Sends the message asynchronously, not waiting for a response.
-    fn msg_async() -> Result<(), SendError>;
+    fn msg_async(&self) -> Result<(), SendError>;
     /// Sends the message asynchronously after a delay.
-    fn msg_async_after(delay: Duration) -> JoinHandle<Result<(), SendError>>;
+    fn msg_async_after(&self, delay: Duration) -> JoinHandle<Result<(), SendError>>;
 }
 ```
 
