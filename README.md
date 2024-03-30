@@ -1,3 +1,6 @@
+> **Have you tried [kameo](https://github.com/tqwewe/kameo)?**
+###### It's the successor to this library and should be preferred for new projects.
+
 # simpl_actor
 
 `simpl_actor` is a Rust library for simplifying actor-based concurrency in Rust applications. It is built on top of Tokio, utilizing async/await and tokio mpsc channels for efficient and intuitive actor system implementation.
